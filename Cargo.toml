@@ -1,0 +1,19 @@
+[package]
+name = "daemon"
+version = "1.0.0"
+edition = "2021"
+description = "DAEMON: a sci-fi hacker terminal and system monitor, inspired by eDEX-UI, written in Rust"
+license = "GPL-3.0"
+repository = "https://github.com/fcopensource/daemon"
+
+[dependencies]
+eframe = "0.29"        # native window + immediate-mode GUI (egui)
+sysinfo = "0.30"       # CPU / memory / processes / network / disks
+portable-pty = "0.8"   # cross-platform PTY (ConPTY on Windows)
+vt100 = "0.15"         # terminal escape-sequence parser / screen model
+chrono = "0.4"         # clock
+rodio = { version = "0.19", default-features = false }  # audio output for synthesized sounds
+
+[profile.release]
+opt-level = 3
+lto = "thin"
