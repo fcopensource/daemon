@@ -1,18 +1,27 @@
-//! Synthesized UI sounds (no audio files). A dedicated thread owns the audio
-//! output stream; the UI sends it sound events over a channel.
+//! UI sounds. Every effect is synthesized at runtime, but any of them can be
+//! replaced by an audio file in a `sounds/` folder (see `custom_file`), and an
+//! optional `sounds/ambient.*` track loops quietly in the background.
+//! A dedicated thread owns the audio output; the UI talks to it over a channel.
 
+use std::collections::HashMap;
 use std::f32::consts::TAU;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
 
 use rodio::buffer::SamplesBuffer;
-use rodio::{OutputStream, Source};
+use rodio::{Decoder, OutputStream, Sink, Source};
 
 const RATE: u32 = 44_100;
-/// Master gain applied to every sound.
+/// Master gain applied to every synthesized sound.
 const VOLUME: f32 = 3.0;
+/// Gain of the looping ambient track.
+const AMBIENT_VOLUME: f32 = 0.35;
+/// Audio formats accepted for custom sounds.
+const EXTENSIONS: [&str; 4] = ["wav", "ogg", "mp3", "flac"];
 
 #[derive(Clone, Copy)]
 pub enum Sfx {
@@ -30,41 +39,133 @@ pub enum Sfx {
     Chatter,
 }
 
+impl Sfx {
+    const ALL: [Sfx; 6] = [Sfx::Key, Sfx::Enter, Sfx::Blip, Sfx::Granted, Sfx::Click, Sfx::Chatter];
+
+    /// File stem used to override this sound, e.g. `sounds/key.wav`.
+    fn file_stem(self) -> &'static str {
+        match self {
+            Sfx::Key => "key",
+            Sfx::Enter => "enter",
+            Sfx::Blip => "boot",
+            Sfx::Granted => "granted",
+            Sfx::Click => "click",
+            Sfx::Chatter => "chatter",
+        }
+    }
+}
+
+enum Msg {
+    Play(Sfx),
+    Mute(bool),
+}
+
 pub struct Sound {
-    tx: Sender<Sfx>,
-    pub muted: bool,
+    tx: Sender<Msg>,
+    muted: bool,
     /// Cleared if the audio device could not be opened or playback failed.
     ok: Arc<AtomicBool>,
+    /// Number of custom sound files found (including the ambient track).
+    custom: Arc<AtomicUsize>,
+}
+
+/// Folders searched for custom sounds: `./sounds`, `./assets/sounds`, and
+/// `sounds` next to the executable (or in the macOS bundle's Resources).
+fn sound_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("sounds"), PathBuf::from("assets/sounds")];
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
+        dirs.push(exe_dir.join("sounds"));
+        dirs.push(exe_dir.join("../Resources/sounds"));
+    }
+    dirs
+}
+
+/// Reads the first `<stem>.<ext>` found in the sound folders.
+fn custom_file(stem: &str) -> Option<Arc<[u8]>> {
+    for dir in sound_dirs() {
+        for ext in EXTENSIONS {
+            if let Ok(bytes) = std::fs::read(dir.join(format!("{stem}.{ext}"))) {
+                return Some(bytes.into());
+            }
+        }
+    }
+    None
 }
 
 impl Sound {
     pub fn new(muted: bool) -> Self {
-        let (tx, rx) = mpsc::channel::<Sfx>();
+        let (tx, rx) = mpsc::channel::<Msg>();
         let ok = Arc::new(AtomicBool::new(true));
-        let status = ok.clone();
+        let custom_count = Arc::new(AtomicUsize::new(0));
+        let (status, count) = (ok.clone(), custom_count.clone());
         thread::spawn(move || {
             let Ok((_stream, handle)) = OutputStream::try_default() else {
                 status.store(false, Ordering::Relaxed);
                 return;
             };
+
+            let custom: HashMap<&'static str, Arc<[u8]>> = Sfx::ALL
+                .iter()
+                .filter_map(|s| custom_file(s.file_stem()).map(|b| (s.file_stem(), b)))
+                .collect();
+            let mut found = custom.len();
+
+            // Optional looping background track.
+            let ambient = custom_file("ambient").and_then(|bytes| {
+                let sink = Sink::try_new(&handle).ok()?;
+                let source = Decoder::new_looped(Cursor::new(bytes)).ok()?;
+                sink.append(source.amplify(AMBIENT_VOLUME));
+                if muted {
+                    sink.pause();
+                }
+                found += 1;
+                Some(sink)
+            });
+            count.store(found, Ordering::Relaxed);
+
             let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-            while let Ok(sfx) = rx.recv() {
-                let samples = synth(sfx, &mut rng);
-                if handle.play_raw(SamplesBuffer::new(1, RATE, samples).amplify(VOLUME)).is_err() {
+            while let Ok(msg) = rx.recv() {
+                let sfx = match msg {
+                    Msg::Mute(m) => {
+                        if let Some(sink) = &ambient {
+                            if m { sink.pause() } else { sink.play() }
+                        }
+                        continue;
+                    }
+                    Msg::Play(sfx) => sfx,
+                };
+                let result = match custom.get(sfx.file_stem()).map(|b| Decoder::new(Cursor::new(b.clone()))) {
+                    Some(Ok(decoder)) => handle.play_raw(decoder.convert_samples::<f32>()),
+                    _ => handle.play_raw(SamplesBuffer::new(1, RATE, synth(sfx, &mut rng)).amplify(VOLUME)),
+                };
+                if result.is_err() {
                     status.store(false, Ordering::Relaxed);
                 }
             }
         });
-        Self { tx, muted, ok }
+        Self { tx, muted, ok, custom: custom_count }
     }
 
     pub fn available(&self) -> bool {
         self.ok.load(Ordering::Relaxed)
     }
 
+    pub fn custom_count(&self) -> usize {
+        self.custom.load(Ordering::Relaxed)
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    pub fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        let _ = self.tx.send(Msg::Mute(self.muted));
+    }
+
     pub fn play(&self, sfx: Sfx) {
         if !self.muted {
-            let _ = self.tx.send(sfx);
+            let _ = self.tx.send(Msg::Play(sfx));
         }
     }
 }

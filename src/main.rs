@@ -12,6 +12,15 @@ mod widgets;
 
 use eframe::egui;
 
+/// The "D" window/taskbar icon, embedded in the binary.
+fn app_icon() -> egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("embedded icon is a valid PNG")
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    egui::IconData { rgba: img.into_raw(), width, height }
+}
+
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|a| a == name);
@@ -28,6 +37,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("DAEMON")
+            .with_icon(app_icon())
             .with_inner_size([1280.0, 780.0])
             .with_min_inner_size([1000.0, 600.0])
             .with_maximized(true)

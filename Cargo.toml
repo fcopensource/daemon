@@ -2,7 +2,7 @@
 name = "daemon"
 version = "1.0.0"
 edition = "2021"
-description = "DAEMON: a sci-fi hacker terminal and system monitor, inspired by eDEX-UI, written in Rust"
+description = "DAEMON: a 2050-style holographic terminal and system monitor written in Rust"
 license = "GPL-3.0"
 repository = "https://github.com/fcopensource/daemon"
 
@@ -12,7 +12,22 @@ sysinfo = "0.30"       # CPU / memory / processes / network / disks
 portable-pty = "0.8"   # cross-platform PTY (ConPTY on Windows)
 vt100 = "0.15"         # terminal escape-sequence parser / screen model
 chrono = "0.4"         # clock
-rodio = { version = "0.19", default-features = false }  # audio output for synthesized sounds
+# Audio output; decoders (pure Rust) for user-supplied custom sounds.
+rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis", "flac", "symphonia-mp3"] }
+image = { version = "0.25", default-features = false, features = ["png"] }  # decode the app icon
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"    # embed the icon into daemon.exe
+
+# `cargo bundle --release` builds DAEMON.app on macOS (see RUNNING_ON_MAC.md).
+[package.metadata.bundle]
+name = "DAEMON"
+identifier = "com.fcopensource.daemon"
+icon = ["assets/icon.png"]
+resources = ["sounds"]
+category = "public.app-category.developer-tools"
+short_description = "2050-style holographic terminal and system monitor"
+osx_minimum_system_version = "11.0"
 
 [profile.release]
 opt-level = 3

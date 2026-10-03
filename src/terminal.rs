@@ -223,9 +223,11 @@ pub fn event_to_bytes(event: &egui::Event, app_cursor: bool) -> Option<Vec<u8>> 
     match event {
         Event::Text(t) => Some(t.as_bytes().to_vec()),
         Event::Paste(t) => Some(t.replace("\r\n", "\r").replace('\n', "\r").into_bytes()),
-        // egui turns Ctrl+C / Ctrl+X into Copy / Cut; a terminal wants the control codes.
-        Event::Copy => Some(vec![0x03]),
-        Event::Cut => Some(vec![0x18]),
+        // On Windows/Linux egui turns Ctrl+C / Ctrl+X into Copy / Cut; a terminal wants
+        // the control codes. On macOS those events come from Cmd+C / Cmd+X instead, and
+        // Ctrl+C arrives as a normal key press (handled below).
+        Event::Copy if !cfg!(target_os = "macos") => Some(vec![0x03]),
+        Event::Cut if !cfg!(target_os = "macos") => Some(vec![0x18]),
         Event::Key { key, pressed: true, modifiers, .. } => {
             let arrow = |c: char| {
                 if app_cursor { format!("\x1bO{c}") } else { format!("\x1b[{c}") }
@@ -247,8 +249,9 @@ pub fn event_to_bytes(event: &egui::Event, app_cursor: bool) -> Option<Vec<u8>> 
                 Key::PageUp => "\x1b[5~".into(),
                 Key::PageDown => "\x1b[6~".into(),
                 _ if modifiers.ctrl && !modifiers.alt => {
-                    // Already delivered as Copy / Cut / Paste events.
-                    if matches!(key, Key::C | Key::X | Key::V) {
+                    // Already delivered as Copy / Cut / Paste events (where Ctrl is the
+                    // platform's command key, i.e. not on macOS).
+                    if modifiers.command && matches!(key, Key::C | Key::X | Key::V) {
                         return None;
                     }
                     let name = key.name();

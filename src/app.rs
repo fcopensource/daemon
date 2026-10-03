@@ -278,7 +278,7 @@ impl DaemonApp {
                 pill(ui, format!("{dot} SECURE LINK"), t.accent);
                 if !self.sound.available() {
                     pill(ui, "NO AUDIO".into(), t.alert);
-                } else if self.sound.muted {
+                } else if self.sound.muted() {
                     pill(ui, "SOUND OFF  [F10]".into(), t.alert);
                 } else {
                     pill(ui, "SOUND ON".into(), t.primary);
@@ -356,7 +356,8 @@ impl DaemonApp {
 
         w::header(ui, t, "CONTROLS", "");
         w::kv(ui, t, "THEME", &t.name.to_uppercase());
-        w::kv(ui, t, "SOUND [F10]", if self.sound.muted { "OFF" } else { "ON" });
+        w::kv(ui, t, "SOUND [F10]", if self.sound.muted() { "OFF" } else { "ON" });
+        w::kv(ui, t, "CUSTOM SOUNDS", &self.sound.custom_count().to_string());
         w::kv(ui, t, "FULLSCREEN", "F11");
         w::kv(ui, t, "SCROLLBACK", "MOUSE WHEEL");
     }
@@ -377,7 +378,7 @@ impl eframe::App for DaemonApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
         }
         if key_pressed(&events, egui::Key::F10) {
-            self.sound.muted = !self.sound.muted;
+            self.sound.toggle_mute();
         }
 
         if !self.booted {
