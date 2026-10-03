@@ -79,7 +79,7 @@ pub fn globe(ui: &mut Ui, t: &Theme, time: f64, height: f32) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, height), Sense::hover());
     let p = ui.painter_at(rect);
-    let r = rect.width().min(rect.height()) / 2.0 - 10.0;
+    let r = rect.width().min(rect.height()) / 2.0 - 24.0;
     let c = rect.center();
     let rot = (time * 0.3 % std::f64::consts::TAU) as f32;
     let view = View { c, r, rot, tilt: 0.35 };
@@ -172,6 +172,18 @@ pub fn globe(ui: &mut Ui, t: &Theme, time: f64, height: f32) {
     }
 
     p.circle_stroke(c, r, Stroke::new(1.0_f32, t.alpha(140)));
+
+    // HUD ring: slowly counter-rotating ticks plus a sweeping accent arc.
+    let spin = -(time * 0.15) as f32;
+    for i in 0..72 {
+        let a = spin + i as f32 * 5f32.to_radians();
+        let (inner, alpha) = if i % 6 == 0 { (r + 9.0, 160) } else { (r + 12.0, 60) };
+        let dir = vec2(a.cos(), a.sin());
+        p.line_segment([c + dir * inner, c + dir * (r + 16.0)], Stroke::new(1.0_f32, t.alpha(alpha)));
+    }
+    let sweep = (time * 1.2) as f32;
+    crate::widgets::arc(&p, c, r + 20.0, sweep, sweep + 0.9, Stroke::new(2.0_f32, t.accent_alpha(200)));
+    crate::widgets::arc(&p, c, r + 20.0, sweep + PI, sweep + PI + 0.4, Stroke::new(2.0_f32, t.alpha(140)));
 
     // HUD readouts.
     let font = FontId::monospace(9.0);

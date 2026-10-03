@@ -190,7 +190,7 @@ impl Terminal {
                 pos2(rect.left() + cc as f32 * cw, rect.top() + cr as f32 * ch),
                 vec2(cw, ch),
             );
-            painter.rect_filled(r, 0.0, t.alpha(160));
+            painter.rect_filled(r, 1.0, t.accent_alpha(190));
         }
 
         if self.scroll > 0 {
@@ -268,7 +268,7 @@ pub fn event_to_bytes(event: &egui::Event, app_cursor: bool) -> Option<Vec<u8>> 
 
 fn cell_colors(cell: &vt100::Cell, t: &Theme) -> (Color32, Option<Color32>) {
     let mut fg = match cell.fgcolor() {
-        vt100::Color::Default => t.primary,
+        vt100::Color::Default => t.text,
         vt100::Color::Idx(i) => ansi(if cell.bold() && i < 8 { i + 8 } else { i }),
         vt100::Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
     };

@@ -1,3 +1,4 @@
+use std::f32::consts::{FRAC_PI_2, TAU};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -15,30 +16,23 @@ const SIDE_WIDTH: f32 = 310.0;
 
 /// Purely cosmetic boot sequence.
 const BOOT_LOG: &[&str] = &[
-    "DAEMON BIOS v1.0.0  //  build rust-2021  //  github.com/fcopensource/daemon",
-    "",
-    "[ OK ] Seeding entropy pool from /dev/urandom",
-    "[ OK ] Mounting /dev/shadow",
-    "[ OK ] Loading modules: netfilter cryptd stealth ghostfs",
-    "[ OK ] Spoofing hardware address ......... de:ad:be:ef:13:37",
-    "[ OK ] Routing through 7 proxy nodes",
-    "[ OK ] Establishing encrypted tunnel ..... AES-256-GCM",
-    "[ OK ] Uplink handshake .................. 0x1F3A9C",
-    "[ OK ] Bypassing ICE layer 1/3",
-    "[ OK ] Bypassing ICE layer 2/3",
-    "[ OK ] Bypassing ICE layer 3/3",
-    "[WARN] Trace detected — rerouting",
-    "[ OK ] Trace evaded",
-    "[ OK ] Attaching system probes",
-    "[ OK ] Syncing global node map",
-    "[ OK ] Spawning shell daemon ............. pid 1337",
-    "",
-    "root@daemon:~# ./connect --stealth",
+    "QUANTUM CORE ............... SYNCHRONIZED",
+    "ENTROPY POOL ............... 4096 QBITS",
+    "NEURAL INTERFACE ........... CALIBRATED",
+    "BIOMETRIC SIGNATURE ........ VERIFIED",
+    "HOLO-RENDER PIPELINE ....... ONLINE",
+    "MESH UPLINK ................ 7 RELAYS",
+    "ENCRYPTION ................. POST-QUANTUM / KYBER-1024",
+    "INTRUSION SHIELD ........... ARMED",
+    "ORBITAL NODE MAP ........... LOCKED",
+    "SYSTEM PROBES .............. ATTACHED",
+    "SHELL DAEMON ............... SPAWNED",
+    "ALL SUBSYSTEMS ............. NOMINAL",
 ];
 /// Boot lines revealed per second.
-const BOOT_SPEED: f32 = 11.0;
-/// Extra ticks (at BOOT_SPEED) the ACCESS GRANTED banner stays up.
-const BOOT_HOLD: usize = 20;
+const BOOT_SPEED: f32 = 6.0;
+/// Extra ticks (at BOOT_SPEED) the welcome screen stays up.
+const BOOT_HOLD: usize = 12;
 
 pub struct DaemonApp {
     theme: Theme,
@@ -67,7 +61,7 @@ fn apply_style(ctx: &egui::Context, t: &Theme) {
     let mut style = (*ctx.style()).clone();
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
-    v.override_text_color = Some(t.primary);
+    v.override_text_color = Some(t.text);
     v.panel_fill = t.bg;
     v.window_fill = t.bg;
     v.extreme_bg_color = t.bg;
@@ -79,11 +73,24 @@ fn apply_style(ctx: &egui::Context, t: &Theme) {
     ctx.set_style(style);
 }
 
-fn panel_frame(t: &Theme) -> egui::Frame {
+/// Transparent outer frame for a panel: leaves a gap around the glass panel inside it.
+fn gap_frame() -> egui::Frame {
+    egui::Frame::none().inner_margin(Margin::same(5.0))
+}
+
+/// Floating translucent "glass" panel that fills the space it is given.
+fn glass<R>(ui: &mut egui::Ui, t: &Theme, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::none()
-        .fill(t.bg)
-        .inner_margin(Margin::same(10.0))
-        .stroke(Stroke::new(1.0_f32, t.alpha(45)))
+        .fill(t.panel)
+        .rounding(10.0)
+        .inner_margin(Margin::same(12.0))
+        .stroke(Stroke::new(1.0_f32, t.alpha(40)))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            w::corners(ui.ctx(), ui.max_rect().expand(12.0), t.accent_alpha(170));
+            add(ui)
+        })
+        .inner
 }
 
 fn key_pressed(events: &[egui::Event], key: egui::Key) -> bool {
@@ -167,18 +174,19 @@ impl DaemonApp {
                 egui::Event::Key { pressed: true, .. } | egui::Event::PointerButton { pressed: true, .. }
             )
         });
-        let shown = (self.boot_start.elapsed().as_secs_f32() * BOOT_SPEED) as usize;
+        let elapsed = self.boot_start.elapsed().as_secs_f32();
+        let shown = (elapsed * BOOT_SPEED) as usize;
         if skip || shown > BOOT_LOG.len() + BOOT_HOLD {
             self.booted = true;
             ctx.request_repaint();
             return;
         }
 
-        // Sounds: a blip per new log line, a fanfare when access is granted.
+        // Sounds: a blip per subsystem, a power-up when the link is established.
         while self.boot_lines_played < shown.min(BOOT_LOG.len() + 1) {
             if self.boot_lines_played == BOOT_LOG.len() {
                 self.sound.play(Sfx::Granted);
-            } else if !BOOT_LOG[self.boot_lines_played].is_empty() {
+            } else {
                 self.sound.play(Sfx::Blip);
             }
             self.boot_lines_played += 1;
@@ -186,54 +194,94 @@ impl DaemonApp {
 
         let t = self.theme;
         let time = ctx.input(|i| i.time);
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(t.bg).inner_margin(Margin::same(24.0)))
-            .show(ctx, |ui| {
-                let full = ui.max_rect();
-                {
-                    let p = ui.painter();
-                    w::matrix_rain(p, full.expand(24.0), &t, time);
-                    // Dim the rain behind the log text.
-                    p.rect_filled(
-                        egui::Rect::from_min_size(full.min, vec2(full.width().min(760.0), full.height())),
-                        0.0,
-                        egui::Color32::from_black_alpha(200),
-                    );
+        let tf = time as f32;
+        let progress = (elapsed * BOOT_SPEED / BOOT_LOG.len() as f32).min(1.0);
+        let done = shown >= BOOT_LOG.len();
+        let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+        w::backdrop(ctx, &t, time);
+
+        egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+            let full = ui.max_rect().shrink(30.0);
+            let p = ui.painter();
+            let c = full.center() - vec2(0.0, 50.0);
+
+            // Scanner: counter-rotating segmented rings around a progress arc.
+            let rings: [(f32, f32, usize, f32); 4] = [(150.0, 0.6, 3, 2.0), (172.0, -0.35, 6, 1.0), (196.0, 0.22, 2, 3.0), (222.0, -0.12, 10, 1.0)];
+            for (i, &(r, speed, segs, width)) in rings.iter().enumerate() {
+                let color = if i % 2 == 0 { t.primary } else { t.accent };
+                let n = segs as f32;
+                for k in 0..segs {
+                    let a0 = tf * speed + k as f32 * TAU / n;
+                    w::arc(p, c, r, a0, a0 + TAU / n * 0.55, Stroke::new(width, color.gamma_multiply(0.85)));
                 }
-                for line in BOOT_LOG.iter().take(shown) {
-                    let color = if line.starts_with("[WARN]") { t.alert } else { t.alpha(230) };
-                    ui.label(RichText::new(*line).font(FontId::monospace(14.0)).color(color));
-                }
-                if shown > BOOT_LOG.len() {
-                    let p = ui.painter();
-                    let banner = egui::Rect::from_center_size(full.center(), vec2(620.0, 190.0));
-                    p.rect_filled(banner, 0.0, egui::Color32::from_black_alpha(235));
-                    p.rect_stroke(banner, 0.0, Stroke::new(2.0_f32, t.primary));
-                    w::glitch_text(p, banner.center() - vec2(0.0, 28.0), Align2::CENTER_CENTER, "DAEMON", FontId::monospace(80.0), &t, time * 3.0);
-                    let blink = (time * 3.0) as i64 % 2 == 0;
-                    if blink {
-                        p.text(banner.center() + vec2(0.0, 52.0), Align2::CENTER_CENTER, "[ ACCESS GRANTED ]", FontId::monospace(22.0), t.primary);
-                    }
-                }
-                ui.painter().text(full.right_bottom(), Align2::RIGHT_BOTTOM, "press any key to skip", FontId::monospace(11.0), t.alpha(110));
-            });
-        w::scanlines(ctx, &t, time);
+            }
+            p.circle_filled(c, 128.0, t.alpha(10));
+            p.circle_stroke(c, 128.0, Stroke::new(1.0_f32, t.alpha(50)));
+            w::arc(p, c, 128.0, -FRAC_PI_2, -FRAC_PI_2 + TAU * progress, Stroke::new(4.0_f32, t.accent));
+
+            if done {
+                w::glitch_text(p, c, Align2::CENTER_CENTER, "DAEMON", FontId::monospace(44.0), &t, time * 2.0);
+                p.text(c + vec2(0.0, 40.0), Align2::CENTER_CENTER, "NEURAL LINK ESTABLISHED", FontId::monospace(11.0), t.accent);
+            } else {
+                p.text(c, Align2::CENTER_CENTER, format!("{:>3.0}%", progress * 100.0), FontId::monospace(44.0), t.text);
+                p.text(c + vec2(0.0, 40.0), Align2::CENTER_CENTER, "INITIALIZING", FontId::monospace(11.0), t.alpha(160));
+            }
+
+            // Status line and progress bar under the scanner.
+            let bar = egui::Rect::from_center_size(c + vec2(0.0, 290.0), vec2(460.0, 4.0));
+            w::progress(p, bar, &t, progress);
+            let status = if done {
+                format!("WELCOME BACK, {}", user.to_uppercase())
+            } else {
+                BOOT_LOG[shown.min(BOOT_LOG.len() - 1)].to_string()
+            };
+            p.text(bar.center_top() - vec2(0.0, 12.0), Align2::CENTER_BOTTOM, status, FontId::monospace(13.0), t.text);
+
+            // Recent subsystem log, bottom-left.
+            let visible = &BOOT_LOG[shown.min(BOOT_LOG.len()).saturating_sub(8)..shown.min(BOOT_LOG.len())];
+            for (j, line) in visible.iter().rev().enumerate() {
+                let y = full.bottom() - j as f32 * 18.0;
+                let a = 200u8.saturating_sub(j as u8 * 22);
+                p.text(egui::pos2(full.left(), y), Align2::LEFT_BOTTOM, format!("› {line}"), FontId::monospace(11.0), t.alpha(a));
+            }
+
+            p.text(full.left_top(), Align2::LEFT_TOP, "DAEMON OS  //  v2050.1", FontId::monospace(12.0), t.alpha(170));
+            p.text(
+                full.right_top(),
+                Align2::RIGHT_TOP,
+                chrono::Local::now().format("%Y.%m.%d  %H:%M:%S").to_string(),
+                FontId::monospace(12.0),
+                t.alpha(170),
+            );
+            p.text(full.right_bottom(), Align2::RIGHT_BOTTOM, "press any key to skip", FontId::monospace(11.0), t.alpha(110));
+        });
         ctx.request_repaint();
     }
 
     fn top_bar(&self, ui: &mut egui::Ui, s: &Snapshot, time: f64) {
         let t = &self.theme;
+        let pill = |ui: &mut egui::Ui, text: String, c: egui::Color32| {
+            ui.label(RichText::new(format!("  {text}  ")).color(c).background_color(c.gamma_multiply(0.14)).size(11.0));
+        };
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(70.0, 18.0), Sense::hover());
-            w::glitch_text(ui.painter(), rect.left_center(), Align2::LEFT_CENTER, "DAEMON", FontId::monospace(15.0), t, time);
-            ui.label(RichText::new("// ROOT ACCESS TERMINAL").color(t.alpha(110)));
+            let (rect, _) = ui.allocate_exact_size(vec2(96.0, 22.0), Sense::hover());
+            let p = ui.painter();
+            let logo = rect.left_center() + vec2(8.0, 0.0);
+            p.circle_stroke(logo, 7.0, Stroke::new(1.5_f32, t.accent));
+            p.circle_filled(logo, 2.5, t.primary);
+            w::glitch_text(p, rect.left_center() + vec2(22.0, 0.0), Align2::LEFT_CENTER, "DAEMON", FontId::monospace(15.0), t, time);
+            ui.label(RichText::new("NEURAL OPERATING INTERFACE  ·  v2050.1").color(t.alpha(120)).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
-                ui.label(RichText::new(format!("root@{}  [{user}]", s.hostname)).color(t.alpha(170)));
+                ui.label(RichText::new(format!("{user}@{}", s.hostname)).color(t.alpha(170)).size(11.0));
                 let dot = if (time * 1.5) as i64 % 2 == 0 { "●" } else { "○" };
-                ui.label(RichText::new(format!("{dot} SECURE LINK")).color(t.accent));
-                if self.sound.muted {
-                    ui.label(RichText::new("MUTED").color(t.alert));
+                pill(ui, format!("{dot} SECURE LINK"), t.accent);
+                if !self.sound.available() {
+                    pill(ui, "NO AUDIO".into(), t.alert);
+                } else if self.sound.muted {
+                    pill(ui, "SOUND OFF  [F10]".into(), t.alert);
+                } else {
+                    pill(ui, "SOUND ON".into(), t.primary);
                 }
             });
         });
@@ -342,6 +390,8 @@ impl eframe::App for DaemonApp {
         let t = self.theme;
         let time = ctx.input(|i| i.time);
 
+        w::backdrop(ctx, &t, time);
+
         // Ambient "data chatter" every few seconds.
         if time > self.next_chatter {
             self.sound.play(Sfx::Chatter);
@@ -349,58 +399,76 @@ impl eframe::App for DaemonApp {
         }
 
         egui::TopBottomPanel::top("top")
-            .frame(egui::Frame::none().fill(t.bg).inner_margin(Margin::symmetric(10.0, 4.0)))
+            .frame(egui::Frame::none().inner_margin(Margin::symmetric(16.0, 8.0)))
             .show(ctx, |ui| self.top_bar(ui, &snap, time));
+
+        let hidden = egui::scroll_area::ScrollBarVisibility::AlwaysHidden;
 
         egui::SidePanel::left("left")
             .exact_width(SIDE_WIDTH)
             .resizable(false)
-            .frame(panel_frame(&t))
+            .frame(gap_frame())
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().id_salt("left_scroll").show(ui, |ui| self.left_panel(ui, &snap));
+                glass(ui, &t, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("left_scroll")
+                        .scroll_bar_visibility(hidden)
+                        .show(ui, |ui| self.left_panel(ui, &snap));
+                })
             });
 
         egui::SidePanel::right("right")
             .exact_width(SIDE_WIDTH)
             .resizable(false)
-            .frame(panel_frame(&t))
+            .frame(gap_frame())
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().id_salt("right_scroll").show(ui, |ui| self.right_panel(ui, &snap, time));
+                glass(ui, &t, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("right_scroll")
+                        .scroll_bar_visibility(hidden)
+                        .show(ui, |ui| self.right_panel(ui, &snap, time));
+                })
             });
 
         egui::TopBottomPanel::bottom("files")
-            .exact_height(210.0)
+            .exact_height(220.0)
             .resizable(false)
-            .frame(panel_frame(&t))
+            .frame(gap_frame())
             .show(ctx, |ui| {
-                w::header(ui, &t, "FILESYSTEM", &self.files.cwd.display().to_string());
-                if let Some(action) = self.files.show(ui, &t) {
-                    self.sound.play(Sfx::Click);
-                    let cmd = match action {
-                        FileAction::Cd(p) => format!("cd \"{}\"\r", p.display()),
-                        FileAction::Insert(p) => format!("\"{}\" ", p.display()),
-                    };
-                    if let Some(term) = self.term.as_mut() {
-                        term.write(cmd.as_bytes());
+                glass(ui, &t, |ui| {
+                    w::header(ui, &t, "FILESYSTEM", &self.files.cwd.display().to_string());
+                    if let Some(action) = self.files.show(ui, &t) {
+                        self.sound.play(Sfx::Click);
+                        let cmd = match action {
+                            FileAction::Cd(p) => format!("cd \"{}\"\r", p.display()),
+                            FileAction::Insert(p) => format!("\"{}\" ", p.display()),
+                        };
+                        if let Some(term) = self.term.as_mut() {
+                            term.write(cmd.as_bytes());
+                        }
                     }
-                }
+                })
             });
 
-        egui::CentralPanel::default().frame(panel_frame(&t)).show(ctx, |ui| {
-            w::header(ui, &t, "TERMINAL", "ROOT SHELL // TTY0");
-            ui.add_space(4.0);
-            match (self.term.as_mut(), &self.term_err) {
-                (Some(term), _) => term.show(ui, &t),
-                (None, err) => {
-                    ui.colored_label(t.alert, format!(
-                        "FAILED TO START SHELL: {}\n\nPress ENTER to retry. Set DAEMON_SHELL to choose a different shell.",
-                        err.as_deref().unwrap_or("unknown error")
-                    ));
+        egui::CentralPanel::default().frame(gap_frame()).show(ctx, |ui| {
+            glass(ui, &t, |ui| {
+                w::header(ui, &t, "TERMINAL", "NEURAL SHELL  //  TTY0");
+                ui.add_space(4.0);
+                match (self.term.as_mut(), &self.term_err) {
+                    (Some(term), _) => term.show(ui, &t),
+                    (None, err) => {
+                        ui.colored_label(t.alert, format!(
+                            "FAILED TO START SHELL: {}\n\nPress ENTER to retry. Set DAEMON_SHELL to choose a different shell.",
+                            err.as_deref().unwrap_or("unknown error")
+                        ));
+                    }
                 }
-            }
+            })
         });
 
-        w::scanlines(ctx, &t, time);
+        if t.retro {
+            w::scanlines(ctx);
+        }
 
         // Globe, scanlines and cursor are animated: ~30 fps.
         ctx.request_repaint_after(Duration::from_millis(33));

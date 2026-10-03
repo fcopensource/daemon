@@ -16,25 +16,27 @@ browser engine, and the binary is about 8 MB.
 
 ## Features
 
-- **Boot sequence**: Matrix-style digital rain, a fake intrusion log and a glitching
-  `ACCESS GRANTED` banner. Press any key to skip it.
+- **Boot sequence**: an animated scanner with counter-rotating rings, a progress arc and
+  subsystem log ending in `NEURAL LINK ESTABLISHED`. Press any key to skip it.
 - **Working terminal**: runs your shell (PowerShell on Windows, `$SHELL` elsewhere) through a PTY
   (ConPTY on Windows). It supports xterm-256color and truecolor, and has 5000 lines of scrollback.
-- **Rotating 3D globe**: a wireframe Earth with dotted continents, pulsing network nodes and
+- **Rotating 3D globe**: a holographic Earth inside a spinning HUD ring, dotted continents, pulsing nodes and
   data packets moving along great-circle links.
-- **Hacker sounds**: keystroke clicks, an Enter thunk, boot beeps, an access-granted fanfare and
+- **Sci-fi sounds**: glassy keystroke ticks, an Enter pulse, boot pings, a power-up sweep and
   ambient data chatter. All sounds are synthesized at runtime, so there are no audio files.
 - **Live system stats**: CPU (total and per-core), a memory dot grid, the top processes,
   network RX/TX and disk usage.
-- **CRT effects**: scanlines, a moving refresh band and glitch text.
+- **2050 holographic UI**: floating glass panels, glowing corner brackets, gradient graphs and
+  a drifting dot-grid backdrop.
 - **File browser**: click a folder to `cd` the shell into it. Click a file to type its path at the prompt.
-- **Themes**: `daemon` (neon green, the default), `amber`, `ice`, `red`, `purple`, `tron` and `blade`.
+- **Themes**: `nova` (cyan and neon green, the default), `neon`, `solar`, `ice`, `crimson`, `tron`,
+  and `matrix` (retro green with CRT scanlines).
 
 ## Run
 
 ```sh
 cargo run --release
-cargo run --release -- --theme amber --fullscreen
+cargo run --release -- --theme neon --fullscreen
 cargo run --release -- --mute
 ```
 
@@ -73,7 +75,7 @@ On Linux you also need the ALSA headers for sound (`sudo apt install libasound2-
 | `src/sound.rs`    | Sound synthesizer on its own audio thread (`rodio`) |
 | `src/stats.rs`    | Background thread that samples `sysinfo` once a second |
 | `src/files.rs`    | Directory listing and clickable tiles |
-| `src/widgets.rs`  | Graphs, bars, memory grid, scanlines, glitch text, digital rain |
+| `src/widgets.rs`  | Graphs, bars, memory grid, glass backdrop, corner brackets, glitch text |
 | `src/theme.rs`    | Color themes |
 
 The PTY reader, the stats sampler and the audio player each run on their own thread. The UI

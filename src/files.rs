@@ -112,12 +112,12 @@ fn tile(ui: &mut egui::Ui, t: &Theme, name: &str, is_dir: bool, sub: &str) -> eg
     let p = ui.painter();
     let hovered = resp.hovered();
     if hovered {
-        p.rect_filled(rect, 2.0, t.alpha(30));
-        p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, t.alpha(90)));
+        p.rect_filled(rect, 6.0, t.accent_alpha(25));
+        p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, t.accent_alpha(120)));
     }
     let icon = Rect::from_center_size(pos2(rect.center().x, rect.top() + 17.0), vec2(22.0, 16.0));
     if is_dir {
-        let c = t.alpha(if hovered { 230 } else { 150 });
+        let c = if hovered { t.accent } else { t.alpha(170) };
         p.rect_filled(icon, 1.0, c);
         p.rect_filled(Rect::from_min_size(icon.left_top() - vec2(0.0, 4.0), vec2(10.0, 4.0)), 0.0, c);
     } else {

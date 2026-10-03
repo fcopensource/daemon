@@ -22,7 +22,7 @@ fn main() -> eframe::Result<()> {
         .position(|a| a == "--theme")
         .and_then(|i| args.get(i + 1).cloned())
         .or_else(|| std::env::var("DAEMON_THEME").ok())
-        .unwrap_or_else(|| "daemon".into());
+        .unwrap_or_else(|| "nova".into());
     let theme = theme::Theme::from_name(&theme_name);
 
     let options = eframe::NativeOptions {

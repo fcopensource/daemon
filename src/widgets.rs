@@ -1,11 +1,11 @@
-//! Small custom-painted widgets in the eDEX style.
+//! Custom-painted HUD widgets.
 
 use std::collections::VecDeque;
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 
 use crate::stats::HISTORY;
-use crate::theme::Theme;
+use crate::theme::{lerp_color, Theme};
 
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -36,49 +36,52 @@ pub fn fmt_duration(secs: u64) -> String {
     format!("{d}d {h:02}:{m:02}:{s:02}")
 }
 
-/// Section title with an underline, e.g. "CPU USAGE ─────────── 12%".
+/// Section title: accent tick, label, faint rule, and a right-aligned readout.
 pub fn header(ui: &mut Ui, t: &Theme, left: &str, right: &str) {
-    ui.add_space(8.0);
+    ui.add_space(10.0);
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
     let font = FontId::monospace(10.0);
     let cw = ui.fonts(|f| f.glyph_width(&font, 'M'));
-    let max_right = ((w / cw) as usize).saturating_sub(left.chars().count() + 4);
+    let max_right = ((w / cw) as usize).saturating_sub(left.chars().count() + 6);
     let p = ui.painter();
-    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, t.alpha(110)));
-    p.line_segment([rect.left_bottom(), rect.left_bottom() - vec2(0.0, 5.0)], Stroke::new(1.0_f32, t.primary));
-    p.line_segment([rect.right_bottom(), rect.right_bottom() - vec2(0.0, 5.0)], Stroke::new(1.0_f32, t.primary));
-    p.text(rect.left_center() + vec2(4.0, -1.0), Align2::LEFT_CENTER, left, FontId::monospace(11.0), t.primary);
-    p.text(rect.right_center() + vec2(-4.0, -1.0), Align2::RIGHT_CENTER, truncate(right, max_right), font, t.alpha(150));
-    ui.add_space(4.0);
+    p.rect_filled(Rect::from_min_size(rect.left_center() - vec2(0.0, 5.0), vec2(3.0, 10.0)), 1.5, t.accent);
+    p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, left, FontId::monospace(11.0), t.primary);
+    p.text(rect.right_center(), Align2::RIGHT_CENTER, truncate(right, max_right), font, t.alpha(150));
+    // Rule that fades from primary to transparent.
+    let y = rect.bottom() + 1.0;
+    let segs = 24;
+    for i in 0..segs {
+        let x0 = rect.left() + rect.width() * i as f32 / segs as f32;
+        let x1 = rect.left() + rect.width() * (i + 1) as f32 / segs as f32;
+        let a = (70.0 * (1.0 - i as f32 / segs as f32)) as u8 + 12;
+        p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0_f32, t.alpha(a)));
+    }
+    ui.add_space(6.0);
 }
 
-/// "KEY ............ value" row, value truncated to fit.
+/// "KEY            value" row, value truncated to fit.
 pub fn kv(ui: &mut Ui, t: &Theme, key: &str, value: &str) {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 17.0), Sense::hover());
     let font = FontId::monospace(11.0);
     let cw = ui.fonts(|f| f.glyph_width(&font, 'M'));
     let max = ((w / cw) as usize).saturating_sub(key.chars().count() + 2).max(4);
     let p = ui.painter();
-    p.text(rect.left_center(), Align2::LEFT_CENTER, key, font.clone(), t.alpha(140));
-    p.text(rect.right_center(), Align2::RIGHT_CENTER, truncate(value, max), font, t.primary);
+    p.text(rect.left_center(), Align2::LEFT_CENTER, key, font.clone(), t.alpha(130));
+    p.text(rect.right_center(), Align2::RIGHT_CENTER, truncate(value, max), font, t.text);
 }
 
-/// Line graph of one or more series over the last `HISTORY` samples.
+/// Area graph of one or more series over the last `HISTORY` samples.
 pub fn graph(ui: &mut Ui, t: &Theme, series: &[(&VecDeque<f32>, Color32)], max: f32, height: f32) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, height), Sense::hover());
     let p = ui.painter();
-    p.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, t.alpha(50)));
-    let grid = Stroke::new(1.0_f32, t.alpha(18));
+    p.rect_filled(rect, 4.0, t.alpha(8));
+    let grid = Stroke::new(1.0_f32, t.alpha(14));
     for i in 1..4 {
         let y = rect.top() + rect.height() * i as f32 / 4.0;
         p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], grid);
-    }
-    for i in 1..12 {
-        let x = rect.left() + rect.width() * i as f32 / 12.0;
-        p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], grid);
     }
 
     let max = max.max(1e-3);
@@ -93,15 +96,26 @@ pub fn graph(ui: &mut Ui, t: &Theme, series: &[(&VecDeque<f32>, Color32)], max: 
             .enumerate()
             .map(|(i, v)| {
                 let x = rect.right() - (n - 1 - i) as f32 * step;
-                let y = rect.bottom() - 1.0 - (v / max).clamp(0.0, 1.0) * (rect.height() - 2.0);
+                let y = rect.bottom() - 1.0 - (v / max).clamp(0.0, 1.0) * (rect.height() - 6.0);
                 pos2(x, y)
             })
             .collect();
-        p.add(Shape::line(pts, Stroke::new(1.5_f32, *color)));
+        // Translucent fill under the curve, brighter near the line.
+        for pt in &pts {
+            let h = rect.bottom() - pt.y;
+            let mid = pos2(pt.x, pt.y + h * 0.35);
+            p.line_segment([*pt, mid], Stroke::new(step + 0.5, color.gamma_multiply(0.18)));
+            p.line_segment([mid, pos2(pt.x, rect.bottom())], Stroke::new(step + 0.5, color.gamma_multiply(0.07)));
+        }
+        p.add(Shape::line(pts.clone(), Stroke::new(4.0_f32, color.gamma_multiply(0.15))));
+        p.add(Shape::line(pts.clone(), Stroke::new(1.5_f32, *color)));
+        if let Some(last) = pts.last() {
+            p.circle_filled(*last, 3.0, *color);
+        }
     }
 }
 
-/// One vertical bar per CPU core.
+/// One rounded vertical bar per CPU core, colored by load.
 pub fn core_bars(ui: &mut Ui, t: &Theme, cores: &[f32]) {
     if cores.is_empty() {
         return;
@@ -110,28 +124,45 @@ pub fn core_bars(ui: &mut Ui, t: &Theme, cores: &[f32]) {
     let (rect, _) = ui.allocate_exact_size(vec2(w, 34.0), Sense::hover());
     let p = ui.painter();
     let n = cores.len() as f32;
-    let gap = 2.0;
+    let gap = 3.0;
     let bw = ((rect.width() - gap * (n - 1.0)) / n).max(1.0);
     for (i, c) in cores.iter().enumerate() {
         let x = rect.left() + i as f32 * (bw + gap);
-        p.rect_filled(Rect::from_min_size(pos2(x, rect.top()), vec2(bw, rect.height())), 0.0, t.alpha(25));
-        let h = rect.height() * (c / 100.0).clamp(0.0, 1.0);
-        p.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - h), pos2(x + bw, rect.bottom())), 0.0, t.primary);
+        p.rect_filled(Rect::from_min_size(pos2(x, rect.top()), vec2(bw, rect.height())), 2.0, t.alpha(18));
+        let frac = (c / 100.0).clamp(0.0, 1.0);
+        let h = (rect.height() * frac).max(2.0);
+        let color = lerp_color(t.primary, t.accent, frac * 1.4);
+        p.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - h), pos2(x + bw, rect.bottom())), 2.0, color);
     }
 }
 
-/// Horizontal progress bar.
+/// Thin rounded progress bar with a primary → accent gradient.
 pub fn bar(ui: &mut Ui, t: &Theme, frac: f32) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 5.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, 0.0, t.alpha(30));
-    let color = if frac > 0.9 { t.alert } else { t.primary };
-    let filled = Rect::from_min_size(rect.min, vec2(rect.width() * frac.clamp(0.0, 1.0), rect.height()));
-    p.rect_filled(filled, 0.0, color);
+    if frac > 0.9 {
+        let p = ui.painter();
+        p.rect_filled(rect, rect.height() / 2.0, t.alpha(25));
+        p.rect_filled(Rect::from_min_size(rect.min, vec2(rect.width() * frac.min(1.0), rect.height())), rect.height() / 2.0, t.alert);
+    } else {
+        progress(ui.painter(), rect, t, frac);
+    }
 }
 
-/// eDEX-style grid of dots, filled proportionally to memory usage.
+pub fn progress(p: &egui::Painter, rect: Rect, t: &Theme, frac: f32) {
+    p.rect_filled(rect, rect.height() / 2.0, t.alpha(25));
+    let frac = frac.clamp(0.0, 1.0);
+    let segs = 40;
+    let filled_w = rect.width() * frac;
+    for i in 0..segs {
+        let x0 = rect.left() + filled_w * i as f32 / segs as f32;
+        let x1 = rect.left() + filled_w * (i + 1) as f32 / segs as f32;
+        let c = lerp_color(t.primary, t.accent, (x1 - rect.left()) / rect.width().max(1.0));
+        p.rect_filled(Rect::from_min_max(pos2(x0, rect.top()), pos2(x1 + 0.5, rect.bottom())), 0.0, c);
+    }
+}
+
+/// Memory as a grid of cells, filled with a primary → accent gradient.
 pub fn mem_grid(ui: &mut Ui, t: &Theme, frac: f32) {
     const COLS: usize = 40;
     const ROWS: usize = 5;
@@ -143,21 +174,69 @@ pub fn mem_grid(ui: &mut Ui, t: &Theme, frac: f32) {
     for i in 0..COLS * ROWS {
         let (col, row) = (i / ROWS, i % ROWS);
         let c = pos2(rect.left() + (col as f32 + 0.5) * cell, rect.top() + (row as f32 + 0.5) * cell);
-        let color = if i < filled { t.primary } else { t.alpha(35) };
-        p.rect_filled(Rect::from_center_size(c, Vec2::splat(cell * 0.55)), 0.0, color);
+        let color = if i < filled { lerp_color(t.primary, t.accent, col as f32 / COLS as f32) } else { t.alpha(22) };
+        p.rect_filled(Rect::from_center_size(c, Vec2::splat(cell * 0.6)), 1.5, color);
     }
 }
 
-fn hash(mut x: u64) -> u64 {
-    // splitmix64
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
+/// Glowing L-shaped brackets on the corners of `rect` (foreground layer).
+pub fn corners(ctx: &egui::Context, rect: Rect, color: Color32) {
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("corners")));
+    let l = 14.0;
+    let s = Stroke::new(2.0_f32, color);
+    for (c, dx, dy) in [
+        (rect.left_top(), 1.0, 1.0),
+        (rect.right_top(), -1.0, 1.0),
+        (rect.left_bottom(), 1.0, -1.0),
+        (rect.right_bottom(), -1.0, -1.0),
+    ] {
+        p.line_segment([c, c + vec2(l * dx, 0.0)], s);
+        p.line_segment([c, c + vec2(0.0, l * dy)], s);
+    }
 }
 
-/// CRT scanlines plus a slow-moving refresh band, painted over the whole UI.
-pub fn scanlines(ctx: &egui::Context, t: &Theme, time: f64) {
+/// Space-dark backdrop with a faint dot grid and two soft color glows.
+pub fn backdrop(ctx: &egui::Context, t: &Theme, time: f64) {
+    let p = ctx.layer_painter(egui::LayerId::background());
+    let screen = ctx.screen_rect();
+    p.rect_filled(screen, 0.0, t.bg);
+    let drift = (time * 0.05).sin() as f32 * 60.0;
+    for (center, color, radius) in [
+        (screen.left_top() + vec2(screen.width() * 0.25 + drift, screen.height() * 0.3), t.primary, 520.0),
+        (screen.right_bottom() - vec2(screen.width() * 0.2 - drift, screen.height() * 0.25), t.accent, 460.0),
+    ] {
+        for k in 0..6 {
+            let r = radius * (1.0 - k as f32 * 0.15);
+            p.circle_filled(center, r, color.gamma_multiply(0.012));
+        }
+    }
+    let spacing = 26.0;
+    let dot = t.alpha(16);
+    let mut y = screen.top() + spacing / 2.0;
+    while y < screen.bottom() {
+        let mut x = screen.left() + spacing / 2.0;
+        while x < screen.right() {
+            p.circle_filled(pos2(x, y), 0.8, dot);
+            x += spacing;
+        }
+        y += spacing;
+    }
+}
+
+/// Polyline arc from angle `a0` to `a1` (radians).
+pub fn arc(p: &egui::Painter, c: Pos2, r: f32, a0: f32, a1: f32, stroke: Stroke) {
+    let steps = (((a1 - a0).abs() * r) / 6.0).ceil().max(2.0) as usize;
+    let pts: Vec<Pos2> = (0..=steps)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / steps as f32;
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    p.add(Shape::line(pts, stroke));
+}
+
+/// CRT scanlines (retro themes only).
+pub fn scanlines(ctx: &egui::Context) {
     let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("scanlines")));
     let screen = ctx.screen_rect();
     let mut y = screen.top();
@@ -165,48 +244,15 @@ pub fn scanlines(ctx: &egui::Context, t: &Theme, time: f64) {
         p.line_segment([pos2(screen.left(), y), pos2(screen.right(), y)], Stroke::new(1.0_f32, Color32::from_black_alpha(45)));
         y += 3.0;
     }
-    let band_y = screen.top() + ((time * 70.0) as f32 % (screen.height() + 120.0)) - 120.0;
-    p.rect_filled(Rect::from_min_size(pos2(screen.left(), band_y), vec2(screen.width(), 120.0)), 0.0, t.alpha(2));
 }
 
-/// Text that periodically glitches with red/cyan offset copies.
+/// Text with a periodic chromatic-aberration glitch.
 pub fn glitch_text(p: &egui::Painter, pos: Pos2, align: Align2, text: &str, font: FontId, t: &Theme, time: f64) {
-    let glitching = (time * 0.45).fract() < 0.05;
+    let glitching = (time * 0.4).fract() < 0.04;
     if glitching {
-        let dx = ((time * 113.0).sin() * 4.0) as f32;
-        let dy = ((time * 71.0).cos() * 1.5) as f32;
-        p.text(pos + vec2(dx, dy), align, text, font.clone(), t.alert.gamma_multiply(0.8));
-        p.text(pos - vec2(dx, -dy), align, text, font.clone(), t.accent.gamma_multiply(0.8));
+        let dx = ((time * 113.0).sin() * 3.0) as f32;
+        p.text(pos + vec2(dx, 0.0), align, text, font.clone(), t.accent.gamma_multiply(0.7));
+        p.text(pos - vec2(dx, 0.0), align, text, font.clone(), t.primary.gamma_multiply(0.7));
     }
-    p.text(pos, align, text, font, t.primary);
-}
-
-/// "Digital rain" of falling characters.
-pub fn matrix_rain(p: &egui::Painter, rect: Rect, t: &Theme, time: f64) {
-    const CHARS: &[u8] = b"0123456789ABCDEF<>/\\|#$%&*+=:;{}[]";
-    const TRAIL: u64 = 18;
-    let size = 14.0;
-    let font = FontId::monospace(size - 1.0);
-    let cols = (rect.width() / size) as u64;
-    let rows = (rect.height() / size) as u64 + 1;
-    let flicker = (time * 6.0) as u64;
-    for c in 0..cols {
-        let h = hash(c);
-        let speed = 8.0 + (h % 100) as f64 / 6.0;
-        let head = ((time * speed) as u64 + (h >> 16) % 200) % (rows + TRAIL + 20);
-        for k in 0..TRAIL.min(head + 1) {
-            let row = head - k;
-            if row >= rows {
-                continue;
-            }
-            let ch = CHARS[(hash(c * 7919 + row * 104729 + flicker) % CHARS.len() as u64) as usize] as char;
-            let color = if k == 0 {
-                Color32::from_rgb(200, 255, 200)
-            } else {
-                t.alpha((140.0 * (1.0 - k as f32 / TRAIL as f32)) as u8)
-            };
-            let pos = pos2(rect.left() + c as f32 * size, rect.top() + row as f32 * size);
-            p.text(pos, Align2::LEFT_TOP, ch, font.clone(), color);
-        }
-    }
+    p.text(pos, align, text, font, t.text);
 }
