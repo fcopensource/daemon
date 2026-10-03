@@ -4,8 +4,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, vec2, Align2, FontId, Margin, RichText, Sense, Stroke};
 
+use crate::eye::{self, EyeState};
 use crate::files::{FileAction, FileBrowser};
 use crate::globe;
+use crate::keyboard::Keyboard;
 use crate::sound::{Rng, Sfx, Sound};
 use crate::stats::{self, Shared, Snapshot};
 use crate::terminal::{self, Terminal};
@@ -26,13 +28,18 @@ const BOOT_LOG: &[&str] = &[
     "INTRUSION SHIELD ........... ARMED",
     "ORBITAL NODE MAP ........... LOCKED",
     "SYSTEM PROBES .............. ATTACHED",
+    "DAEMON CORE ................ AWAKENED",
     "SHELL DAEMON ............... SPAWNED",
     "ALL SUBSYSTEMS ............. NOMINAL",
 ];
 /// Boot lines revealed per second.
-const BOOT_SPEED: f32 = 6.0;
+const BOOT_SPEED: f32 = 3.0;
 /// Extra ticks (at BOOT_SPEED) the welcome screen stays up.
-const BOOT_HOLD: usize = 12;
+const BOOT_HOLD: usize = 8;
+/// Boot seconds over which the eye opens.
+const EYE_OPEN: (f32, f32) = (0.6, 1.9);
+/// Boot seconds at which the eye blinks.
+const BLINKS: [f32; 2] = [3.3, 3.85];
 
 pub struct DaemonApp {
     theme: Theme,
@@ -46,6 +53,12 @@ pub struct DaemonApp {
     next_chatter: f64,
     boot_start: Instant,
     boot_lines_played: usize,
+    /// Bit set of boot sound cues already played.
+    boot_cues: u8,
+    keyboard: Keyboard,
+    show_keyboard: bool,
+    /// Time the deep-scan overlay was opened, while it is open.
+    scan_opened: Option<f64>,
     booted: bool,
     ctx: egui::Context,
 }
@@ -125,6 +138,10 @@ impl DaemonApp {
             next_chatter: 8.0,
             boot_start: Instant::now(),
             boot_lines_played: 0,
+            boot_cues: 0,
+            keyboard: Keyboard::default(),
+            show_keyboard: true,
+            scan_opened: None,
             booted: false,
             ctx,
         }
@@ -182,7 +199,14 @@ impl DaemonApp {
             return;
         }
 
-        // Sounds: a blip per subsystem, a power-up when the link is established.
+        // Sound cues: the eye awakens, blinks twice; a glitch per log line; a chord at the end.
+        let cues = [(EYE_OPEN.0 - 0.05, Sfx::Awaken), (BLINKS[0], Sfx::Blink), (BLINKS[1], Sfx::Blink)];
+        for (i, &(at, sfx)) in cues.iter().enumerate() {
+            if elapsed >= at && self.boot_cues & (1 << i) == 0 {
+                self.boot_cues |= 1 << i;
+                self.sound.play(sfx);
+            }
+        }
         while self.boot_lines_played < shown.min(BOOT_LOG.len() + 1) {
             if self.boot_lines_played == BOOT_LOG.len() {
                 self.sound.play(Sfx::Granted);
@@ -198,6 +222,7 @@ impl DaemonApp {
         let progress = (elapsed * BOOT_SPEED / BOOT_LOG.len() as f32).min(1.0);
         let done = shown >= BOOT_LOG.len();
         let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
         w::backdrop(ctx, &t, time);
 
         egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
@@ -205,7 +230,7 @@ impl DaemonApp {
             let p = ui.painter();
             let c = full.center() - vec2(0.0, 50.0);
 
-            // Scanner: counter-rotating segmented rings around a progress arc.
+            // Scanner: counter-rotating segmented rings.
             let rings: [(f32, f32, usize, f32); 4] = [(150.0, 0.6, 3, 2.0), (172.0, -0.35, 6, 1.0), (196.0, 0.22, 2, 3.0), (222.0, -0.12, 10, 1.0)];
             for (i, &(r, speed, segs, width)) in rings.iter().enumerate() {
                 let color = if i % 2 == 0 { t.primary } else { t.accent };
@@ -215,27 +240,45 @@ impl DaemonApp {
                     w::arc(p, c, r, a0, a0 + TAU / n * 0.55, Stroke::new(width, color.gamma_multiply(0.85)));
                 }
             }
-            p.circle_filled(c, 128.0, t.alpha(10));
+
+            // The eye: opens, looks around, blinks twice, then locks onto the pointer.
+            let mut openness = eye::ease(elapsed, EYE_OPEN.0, EYE_OPEN.1);
+            for &b in &BLINKS {
+                if (b..b + 0.22).contains(&elapsed) {
+                    openness *= (2.0 * (elapsed - b) / 0.22 - 1.0).abs().powf(0.7);
+                }
+            }
+            let look = if elapsed < EYE_OPEN.1 {
+                vec2(0.0, 0.3)
+            } else if elapsed < BLINKS[0] {
+                let s = elapsed - EYE_OPEN.1;
+                vec2((s * 2.4).sin() * 0.9, (s * 1.3).sin() * 0.4)
+            } else {
+                pointer.map_or(egui::Vec2::ZERO, |m| ((m - c) / 300.0).clamp(vec2(-1.0, -1.0), vec2(1.0, 1.0)))
+            };
+            let dilation = 1.7 - 0.9 * eye::ease(elapsed, 2.0, 3.6) + if done { 0.15 * (tf * 3.0).sin() } else { 0.0 };
+            eye::eye(p, c, 112.0, 58.0, &EyeState { openness, look, dilation }, t.bg, time);
+
             p.circle_stroke(c, 128.0, Stroke::new(1.0_f32, t.alpha(50)));
             w::arc(p, c, 128.0, -FRAC_PI_2, -FRAC_PI_2 + TAU * progress, Stroke::new(4.0_f32, t.accent));
+            p.text(c + vec2(0.0, 98.0), Align2::CENTER_CENTER, format!("{:>3.0}%", progress * 100.0), FontId::monospace(13.0), t.alpha(200));
 
             if done {
-                w::glitch_text(p, c, Align2::CENTER_CENTER, "DAEMON", FontId::monospace(44.0), &t, time * 2.0);
-                p.text(c + vec2(0.0, 40.0), Align2::CENTER_CENTER, "NEURAL LINK ESTABLISHED", FontId::monospace(11.0), t.accent);
-            } else {
-                p.text(c, Align2::CENTER_CENTER, format!("{:>3.0}%", progress * 100.0), FontId::monospace(44.0), t.text);
-                p.text(c + vec2(0.0, 40.0), Align2::CENTER_CENTER, "INITIALIZING", FontId::monospace(11.0), t.alpha(160));
+                w::glitch_text(p, c + vec2(0.0, 248.0), Align2::CENTER_CENTER, "D A E M O N", FontId::monospace(30.0), &t, time * 2.0);
+            } else if elapsed < EYE_OPEN.1 {
+                let a = (120.0 + 100.0 * (tf * 4.0).sin()) as u8;
+                p.text(c + vec2(0.0, 248.0), Align2::CENTER_CENTER, "AWAKENING", FontId::monospace(13.0), egui::Color32::from_rgba_unmultiplied(255, 70, 50, a));
             }
 
             // Status line and progress bar under the scanner.
-            let bar = egui::Rect::from_center_size(c + vec2(0.0, 290.0), vec2(460.0, 4.0));
+            let bar = egui::Rect::from_center_size(c + vec2(0.0, 300.0), vec2(460.0, 4.0));
             w::progress(p, bar, &t, progress);
             let status = if done {
-                format!("WELCOME BACK, {}", user.to_uppercase())
+                format!("I SEE YOU, {}", user.to_uppercase())
             } else {
                 BOOT_LOG[shown.min(BOOT_LOG.len() - 1)].to_string()
             };
-            p.text(bar.center_top() - vec2(0.0, 12.0), Align2::CENTER_BOTTOM, status, FontId::monospace(13.0), t.text);
+            p.text(bar.center_top() - vec2(0.0, 10.0), Align2::CENTER_BOTTOM, status, FontId::monospace(13.0), t.text);
 
             // Recent subsystem log, bottom-left.
             let visible = &BOOT_LOG[shown.min(BOOT_LOG.len()).saturating_sub(8)..shown.min(BOOT_LOG.len())];
@@ -264,12 +307,15 @@ impl DaemonApp {
             ui.label(RichText::new(format!("  {text}  ")).color(c).background_color(c.gamma_multiply(0.14)).size(11.0));
         };
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(96.0, 22.0), Sense::hover());
-            let p = ui.painter();
-            let logo = rect.left_center() + vec2(8.0, 0.0);
-            p.circle_stroke(logo, 7.0, Stroke::new(1.5_f32, t.accent));
-            p.circle_filled(logo, 2.5, t.primary);
-            w::glitch_text(p, rect.left_center() + vec2(22.0, 0.0), Align2::LEFT_CENTER, "DAEMON", FontId::monospace(15.0), t, time);
+            let (rect, _) = ui.allocate_exact_size(vec2(110.0, 22.0), Sense::hover());
+            let center = rect.left_center() + vec2(13.0, 0.0);
+            // Mini eye: blinks every few seconds and follows the mouse.
+            let look = ui
+                .input(|i| i.pointer.hover_pos())
+                .map_or(egui::Vec2::ZERO, |m| ((m - center) / 400.0).clamp(vec2(-1.0, -1.0), vec2(1.0, 1.0)));
+            let state = EyeState { openness: eye::blink(time, 5.5), look, dilation: 0.8 };
+            eye::eye(ui.painter(), center, 13.0, 7.0, &state, t.bg, time);
+            w::glitch_text(ui.painter(), rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, "DAEMON", FontId::monospace(15.0), t, time);
             ui.label(RichText::new("NEURAL OPERATING INTERFACE  ·  v2050.1").color(t.alpha(120)).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
@@ -283,6 +329,7 @@ impl DaemonApp {
                 } else {
                     pill(ui, "SOUND ON".into(), t.primary);
                 }
+                pill(ui, "DEEP SCAN [F9]".into(), t.alpha(200));
             });
         });
     }
@@ -358,8 +405,71 @@ impl DaemonApp {
         w::kv(ui, t, "THEME", &t.name.to_uppercase());
         w::kv(ui, t, "SOUND [F10]", if self.sound.muted() { "OFF" } else { "ON" });
         w::kv(ui, t, "CUSTOM SOUNDS", &self.sound.custom_count().to_string());
+        w::kv(ui, t, "DEEP SCAN", "F9");
+        w::kv(ui, t, "KEYBOARD [F8]", if self.show_keyboard { "ON" } else { "OFF" });
         w::kv(ui, t, "FULLSCREEN", "F11");
         w::kv(ui, t, "SCROLLBACK", "MOUSE WHEEL");
+    }
+
+    /// Full-screen "deep scan" listing everything known about the machine.
+    fn scan_overlay(&self, ctx: &egui::Context, s: &Snapshot, opened: f64, time: f64) {
+        let t = self.theme;
+        let screen = ctx.screen_rect();
+        let ppp = ctx.pixels_per_point();
+        let mut sections = s.intel.clone();
+        sections.push((
+            "DISPLAY".to_string(),
+            vec![
+                ("RESOLUTION".into(), format!("{:.0} × {:.0} px", screen.width() * ppp, screen.height() * ppp)),
+                ("SCALE".into(), format!("{:.0}%", ppp * 100.0)),
+                ("UI SIZE".into(), format!("{:.0} × {:.0} pt", screen.width(), screen.height())),
+            ],
+        ));
+        // Rows appear progressively, like a scan in progress.
+        let reveal = ((time - opened) * 90.0) as usize;
+
+        egui::Area::new(egui::Id::new("deep_scan"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let bg = t.bg;
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 252));
+                w::corners(ctx, screen.shrink(18.0), t.accent_alpha(200));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(screen.shrink(40.0)), |ui| {
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(vec2(40.0, 30.0), Sense::hover());
+                        let state = EyeState { openness: eye::blink(time, 4.0), look: vec2((time.sin() * 0.8) as f32, 0.0), dilation: 0.7 };
+                        eye::eye(ui.painter(), rect.center(), 18.0, 10.0, &state, bg, time);
+                        let (rect, _) = ui.allocate_exact_size(vec2(520.0, 30.0), Sense::hover());
+                        w::glitch_text(ui.painter(), rect.left_center(), Align2::LEFT_CENTER, "DEEP SCAN  //  SYSTEM INTEL", FontId::monospace(22.0), &t, time);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new("F9 / ESC  CLOSE").color(t.alpha(150)).size(11.0));
+                        });
+                    });
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 36.0;
+                        ui.columns(4, |cols| {
+                            let mut shown = 0;
+                            for (i, (title, rows)) in sections.iter().enumerate() {
+                                let col = &mut cols[i % 4];
+                                if shown >= reveal {
+                                    break;
+                                }
+                                w::header(col, &t, title, &format!("{} ITEMS", rows.len()));
+                                for (k, v) in rows {
+                                    if shown >= reveal {
+                                        break;
+                                    }
+                                    w::kv(col, &t, k, v);
+                                    shown += 1;
+                                }
+                                col.add_space(10.0);
+                            }
+                        });
+                    });
+                });
+            });
     }
 }
 
@@ -373,6 +483,7 @@ impl eframe::App for DaemonApp {
         });
 
         let events = ctx.input(|i| i.events.clone());
+        let time = ctx.input(|i| i.time);
         if key_pressed(&events, egui::Key::F11) {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -386,10 +497,27 @@ impl eframe::App for DaemonApp {
             return;
         }
 
-        self.handle_input(&events);
+        if key_pressed(&events, egui::Key::F8) {
+            self.show_keyboard = !self.show_keyboard;
+        }
+        let close_scan = self.scan_opened.is_some() && key_pressed(&events, egui::Key::Escape);
+        if key_pressed(&events, egui::Key::F9) || close_scan {
+            self.scan_opened = match self.scan_opened {
+                Some(_) => None,
+                None => {
+                    self.sound.play(Sfx::Scan);
+                    Some(time)
+                }
+            };
+        }
+
+        // While the deep scan is open, keystrokes don't reach the shell.
+        if self.scan_opened.is_none() {
+            self.handle_input(&events);
+            self.keyboard.observe(&events);
+        }
         let snap = self.stats.lock().unwrap().clone();
         let t = self.theme;
-        let time = ctx.input(|i| i.time);
 
         w::backdrop(ctx, &t, time);
 
@@ -455,7 +583,10 @@ impl eframe::App for DaemonApp {
             glass(ui, &t, |ui| {
                 w::header(ui, &t, "TERMINAL", "NEURAL SHELL  //  TTY0");
                 ui.add_space(4.0);
-                match (self.term.as_mut(), &self.term_err) {
+                // The on-screen keyboard takes a strip at the bottom of the terminal panel.
+                let kb_height = if self.show_keyboard { (ui.available_height() * 0.32).min(160.0) } else { 0.0 };
+                let term_size = vec2(ui.available_width(), ui.available_height() - kb_height);
+                ui.allocate_ui(term_size, |ui| match (self.term.as_mut(), &self.term_err) {
                     (Some(term), _) => term.show(ui, &t),
                     (None, err) => {
                         ui.colored_label(t.alert, format!(
@@ -463,15 +594,27 @@ impl eframe::App for DaemonApp {
                             err.as_deref().unwrap_or("unknown error")
                         ));
                     }
+                });
+                if self.show_keyboard {
+                    if let Some(bytes) = self.keyboard.show(ui, &t, kb_height) {
+                        self.sound.play(if bytes == b"\r" { Sfx::Enter } else { Sfx::Key });
+                        if let Some(term) = self.term.as_mut() {
+                            term.write(&bytes);
+                        }
+                    }
                 }
             })
         });
+
+        if let Some(opened) = self.scan_opened {
+            self.scan_overlay(ctx, &snap, opened, time);
+        }
 
         if t.retro {
             w::scanlines(ctx);
         }
 
-        // Globe, scanlines and cursor are animated: ~30 fps.
+        // Globe, eye, scanlines and cursor are animated: ~30 fps.
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 }

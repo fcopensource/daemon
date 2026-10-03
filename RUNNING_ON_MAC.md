@@ -110,6 +110,8 @@ lipo -create -output daemon-universal \
 |------|--------------|
 | <kbd>Ctrl</kbd> + <kbd>C</kbd> | interrupt the running command (same as in Terminal.app) |
 | <kbd>Cmd</kbd> + <kbd>V</kbd> | paste |
+| <kbd>fn</kbd> + <kbd>F8</kbd> | show / hide the holo keyboard |
+| <kbd>fn</kbd> + <kbd>F9</kbd> | open / close the deep scan |
 | <kbd>fn</kbd> + <kbd>F10</kbd> | sound on / off |
 | <kbd>fn</kbd> + <kbd>F11</kbd> | fullscreen on / off (the green window button works too) |
 | Trackpad scroll over the terminal | scroll back through output |

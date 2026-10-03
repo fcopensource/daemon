@@ -7,8 +7,11 @@ Supported formats: `.wav`, `.ogg`, `.mp3` and `.flac`.
 |-------------------------------------|---------------|
 | `key.wav`      | every keystroke in the terminal |
 | `enter.wav`    | the Enter key |
+| `awaken.wav`   | the demon eye opening at startup |
+| `blink.wav`    | the demon eye blinking |
 | `boot.wav`     | each line of the boot sequence |
 | `granted.wav`  | when the boot sequence completes |
+| `scan.wav`     | opening the deep scan (F9) |
 | `click.wav`    | clicking a file or folder |
 | `chatter.wav`  | random ambient "data" bursts every few seconds |
 | `ambient.mp3`  | **background loop**: plays quietly and repeats forever |

@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{Components, Disks, Networks, System, Users};
 
 /// Number of samples kept for the graphs (one per second).
 pub const HISTORY: usize = 60;
@@ -57,6 +57,9 @@ pub struct Snapshot {
     pub tx_history: VecDeque<f32>,
 
     pub disks: Vec<DiskInfo>,
+
+    /// Deep-scan report: (section title, [(key, value)]).
+    pub intel: Vec<(String, Vec<(String, String)>)>,
 }
 
 pub type Shared = Arc<Mutex<Snapshot>>;
@@ -81,6 +84,8 @@ pub fn spawn(ctx: egui::Context) -> Shared {
         let mut sys = System::new_all();
         let mut nets = Networks::new_with_refreshed_list();
         let mut disks = Disks::new_with_refreshed_list();
+        let mut components = Components::new_with_refreshed_list();
+        let mut users = Users::new_with_refreshed_list();
 
         let mut snap = Snapshot {
             hostname: System::host_name().unwrap_or_default(),
@@ -173,6 +178,15 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                     .collect();
             }
 
+            // Deep-scan report (every 3s; first one right away).
+            if tick % 3 == 0 {
+                components.refresh();
+                if tick % 30 == 0 {
+                    users.refresh_list();
+                }
+                snap.intel = build_intel(&sys, &nets, &disks, &components, &users);
+            }
+
             *out.lock().unwrap() = snap.clone();
             ctx.request_repaint();
             tick += 1;
@@ -180,4 +194,134 @@ pub fn spawn(ctx: egui::Context) -> Shared {
     });
 
     shared
+}
+
+fn pct(used: u64, total: u64) -> String {
+    if total == 0 { "--".into() } else { format!("{:.1}%", used as f64 / total as f64 * 100.0) }
+}
+
+/// The machine's LAN address. Connecting a UDP socket only picks a route; no packet is sent.
+fn local_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "OFFLINE".into())
+}
+
+/// Everything sysinfo and std can tell us about this machine, grouped into sections.
+fn build_intel(sys: &System, nets: &Networks, disks: &Disks, comps: &Components, users: &Users) -> Vec<(String, Vec<(String, String)>)> {
+    let kv = |k: &str, v: String| (k.to_string(), v);
+    let mut out = Vec::new();
+
+    let boot = chrono::DateTime::from_timestamp(System::boot_time() as i64, 0)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default();
+    let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+    out.push((
+        "IDENTITY".to_string(),
+        vec![
+            kv("HOSTNAME", System::host_name().unwrap_or_default()),
+            kv("OPERATOR", user),
+            kv("OS", System::name().unwrap_or_default()),
+            kv("VERSION", System::long_os_version().unwrap_or_default()),
+            kv("KERNEL", System::kernel_version().unwrap_or_default()),
+            kv("DISTRIBUTION", System::distribution_id()),
+            kv("ARCHITECTURE", std::env::consts::ARCH.to_string()),
+            kv("FAMILY", std::env::consts::FAMILY.to_string()),
+            kv("BOOTED", boot),
+            kv("UPTIME", crate::widgets::fmt_duration(System::uptime())),
+            kv("USER ACCOUNTS", users.iter().map(|u| u.name().to_string()).collect::<Vec<_>>().join(", ")),
+        ],
+    ));
+
+    let cpus = sys.cpus();
+    let first = cpus.first();
+    let load = System::load_average();
+    let mut cpu = vec![
+        kv("MODEL", first.map(|c| c.brand().trim().to_string()).unwrap_or_default()),
+        kv("VENDOR", first.map(|c| c.vendor_id().to_string()).unwrap_or_default()),
+        kv("PHYSICAL CORES", sys.physical_core_count().map(|n| n.to_string()).unwrap_or("--".into())),
+        kv("LOGICAL CORES", cpus.len().to_string()),
+        kv("FREQUENCY", first.map(|c| format!("{} MHz", c.frequency())).unwrap_or_default()),
+        kv("TOTAL LOAD", format!("{:.1}%", sys.global_cpu_info().cpu_usage())),
+        kv("LOAD AVG 1/5/15", format!("{:.2} / {:.2} / {:.2}", load.one, load.five, load.fifteen)),
+    ];
+    for (i, group) in cpus.chunks(4).enumerate() {
+        let line = group.iter().map(|c| format!("{:>3.0}%", c.cpu_usage())).collect::<Vec<_>>().join(" ");
+        cpu.push(kv(&format!("CORES {}-{}", i * 4, i * 4 + group.len() - 1), line));
+    }
+    out.push(("PROCESSOR".to_string(), cpu));
+
+    use crate::widgets::fmt_bytes;
+    out.push((
+        "MEMORY".to_string(),
+        vec![
+            kv("TOTAL", fmt_bytes(sys.total_memory())),
+            kv("USED", format!("{}  ({})", fmt_bytes(sys.used_memory()), pct(sys.used_memory(), sys.total_memory()))),
+            kv("AVAILABLE", fmt_bytes(sys.available_memory())),
+            kv("FREE", fmt_bytes(sys.free_memory())),
+            kv("SWAP TOTAL", fmt_bytes(sys.total_swap())),
+            kv("SWAP USED", format!("{}  ({})", fmt_bytes(sys.used_swap()), pct(sys.used_swap(), sys.total_swap()))),
+        ],
+    ));
+
+    let mut storage = Vec::new();
+    for d in disks.iter() {
+        let used = d.total_space().saturating_sub(d.available_space());
+        storage.push(kv(
+            &d.mount_point().display().to_string(),
+            format!("{} / {}  ({})", fmt_bytes(used), fmt_bytes(d.total_space()), pct(used, d.total_space())),
+        ));
+        storage.push(kv(
+            "  TYPE",
+            format!(
+                "{} · {:?}{}",
+                d.file_system().to_string_lossy(),
+                d.kind(),
+                if d.is_removable() { " · REMOVABLE" } else { "" }
+            ),
+        ));
+    }
+    out.push(("STORAGE".to_string(), storage));
+
+    let mut net = vec![kv("LOCAL IP", local_ip())];
+    let mut ifaces: Vec<_> = nets.iter().collect();
+    ifaces.sort_by_key(|(_, d)| std::cmp::Reverse(d.total_received() + d.total_transmitted()));
+    for (name, d) in ifaces {
+        net.push(kv(&crate::widgets::truncate(name, 18), d.mac_address().to_string()));
+        net.push(kv(
+            "  TRAFFIC",
+            format!("↓ {}  ↑ {}", fmt_bytes(d.total_received()), fmt_bytes(d.total_transmitted())),
+        ));
+        net.push(kv(
+            "  PACKETS",
+            format!("↓ {}  ↑ {}", d.total_packets_received(), d.total_packets_transmitted()),
+        ));
+    }
+    out.push(("NETWORK".to_string(), net));
+
+    let mut thermal: Vec<(String, String)> = comps
+        .iter()
+        .map(|c| (crate::widgets::truncate(&c.label().to_uppercase(), 20), format!("{:.0}°C  (max {:.0}°C)", c.temperature(), c.max())))
+        .collect();
+    if thermal.is_empty() {
+        thermal.push(kv("SENSORS", "NOT EXPOSED BY THIS OS".into()));
+    }
+    out.push(("THERMAL".to_string(), thermal));
+
+    let mut by_mem: Vec<_> = sys.processes().values().collect();
+    by_mem.sort_by_key(|p| std::cmp::Reverse(p.memory()));
+    let mut procs = vec![
+        kv("RUNNING", sys.processes().len().to_string()),
+        kv("DAEMON PID", std::process::id().to_string()),
+    ];
+    for p in by_mem.iter().take(8) {
+        procs.push(kv(&crate::widgets::truncate(&p.name().to_uppercase(), 18), format!("{}  pid {}", fmt_bytes(p.memory()), p.pid())));
+    }
+    out.push(("MEMORY HOGS".to_string(), procs));
+
+    out
 }

@@ -23,15 +23,15 @@
 
 DAEMON turns your terminal into a sci-fi command center. A **real shell** sits in the middle,
 surrounded by live telemetry from your machine: CPU cores, memory, processes, network traffic and
-disks. A **holographic globe** spins in the corner, and every keystroke makes a quiet synthesized
-sound.
+disks. A **holographic globe** spins in the corner, a **demon eye** watches from the top bar, and
+every keystroke makes a glitchy synthesized sound.
 
 It is inspired by the legendary [eDEX-UI](https://github.com/GitSquared/edex-ui), rebuilt from
 scratch in Rust as a lightweight native app.
 
 <div align="center">
-<img src="docs/screenshots/boot.png" alt="DAEMON boot sequence" width="100%">
-<sub><i>The boot sequence: counter-rotating scanner rings, a progress arc and a subsystem log</i></sub>
+<img src="docs/screenshots/boot.png" alt="DAEMON boot sequence: the demon eye opens" width="100%">
+<sub><i>The awakening: the eye opens with a growl, looks around, blinks, and locks onto you</i></sub>
 </div>
 
 ---
@@ -50,24 +50,34 @@ truecolor support, 5000 lines of scrollback and live resizing.
 A rotating 3D Earth with dotted continents, pulsing network nodes, data packets moving along
 great-circle links, and a spinning HUD ring with a radar sweep.
 
-### 🔊 Sci-fi sound design
-Glassy keystroke ticks, an Enter pulse, boot pings, a power-up sweep and ambient data chatter,
-all **synthesized in real time**. You can [replace any of them](#-custom-sounds) with your
-own audio files.
+### 👁️ The demon eye
+A fully shaded eye drawn in real time, with veins, a burning iris, a slit pupil, wet highlights
+and spiked lids. It opens at startup, blinks, and follows your mouse from the top bar.
+
+### 🔊 Hacker × demon sound design
+Bit-crushed keystroke glitches, distorted sub-bass drops on Enter, a growl as the eye opens, a
+detuned tritone power chord, and data chatter with whispers. Everything is **synthesized in
+real time**, and you can [replace any sound](#-custom-sounds) with your own files.
 
 </td>
 <td width="50%" valign="top">
 
-### 📊 Live telemetry
-CPU usage graph with a bar per core, memory cell grid, swap, top processes, network up/down
-graph, and storage for every disk.
+### 🕵️ Deep scan (F9)
+A full-screen report on the whole machine: identity, CPU model and every core, memory, every disk
+(file system, SSD/HDD), network adapters with MAC address and local IP, temperature sensors, user
+accounts, top memory users and display.
 
-### 🗂️ File browser
-Click a folder to `cd` your shell into it. Click a file to type its path at the prompt.
+### ⌨️ Holo keyboard (F8)
+A small translucent keyboard under the terminal. Keys glow as you type, and you can click them to
+type, with sticky Shift, Ctrl, Alt and Caps.
+
+### 📊 Live telemetry & files
+CPU graph with a bar per core, memory grid, top processes, network up/down, storage, and a file
+browser where you click a folder to `cd` into it.
 
 ### 🎨 2050 interface
-Floating glass panels, glowing corner brackets, gradient graphs, a drifting dot-grid
-backdrop, and seven color themes.
+Floating glass panels, glowing corner brackets, gradient graphs, a drifting dot-grid backdrop and
+seven color themes.
 
 </td>
 </tr>
@@ -125,6 +135,8 @@ Then `cargo run --release`.
 
 | Key | Action |
 |-----|--------|
+| <kbd>F8</kbd> | show / hide the holo keyboard |
+| <kbd>F9</kbd> | open / close the deep scan (<kbd>Esc</kbd> also closes it) |
 | <kbd>F10</kbd> | sound on / off |
 | <kbd>F11</kbd> | fullscreen on / off |
 | Mouse wheel over the terminal | scroll back through output |
@@ -163,8 +175,11 @@ built-in effects:
 |------|----------|
 | `key.*` | every keystroke |
 | `enter.*` | the Enter key |
+| `awaken.*` | the eye opening at startup |
+| `blink.*` | the eye blinking |
 | `boot.*` | each boot log line |
 | `granted.*` | boot complete |
+| `scan.*` | opening the deep scan |
 | `click.*` | clicking in the file browser |
 | `chatter.*` | random ambient data bursts |
 | `ambient.*` | **looping background track** |
@@ -208,8 +223,10 @@ flowchart LR
 | [`src/app.rs`](src/app.rs) | Panel layout, boot sequence, input routing |
 | [`src/terminal.rs`](src/terminal.rs) | PTY, escape-sequence parsing, terminal rendering, key mapping |
 | [`src/globe.rs`](src/globe.rs) | The 3D globe: projection, continents, arcs, HUD ring |
-| [`src/sound.rs`](src/sound.rs) | Sound synthesizer and custom-sound loader |
-| [`src/stats.rs`](src/stats.rs) | System statistics sampler |
+| [`src/eye.rs`](src/eye.rs) | The demon eye: shaded meshes, slit pupil, lids, blinking |
+| [`src/keyboard.rs`](src/keyboard.rs) | The translucent on-screen keyboard |
+| [`src/sound.rs`](src/sound.rs) | Sound synthesizer (distortion, bit-crush, echo) and custom-sound loader |
+| [`src/stats.rs`](src/stats.rs) | System statistics sampler and deep-scan report |
 | [`src/files.rs`](src/files.rs) | File browser |
 | [`src/widgets.rs`](src/widgets.rs) | Graphs, bars, glass backdrop, corner brackets |
 | [`src/theme.rs`](src/theme.rs) | Color themes |
@@ -221,7 +238,8 @@ never stalls the 30 fps interface.
 
 ## ✦ Roadmap
 
-- [ ] On-screen keyboard
+- [x] On-screen keyboard
+- [x] Full system deep scan
 - [ ] Multiple terminal tabs
 - [ ] File browser that follows the shell's working directory
 - [ ] Text selection and copy in the terminal

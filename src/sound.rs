@@ -17,7 +17,7 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 
 const RATE: u32 = 44_100;
 /// Master gain applied to every synthesized sound.
-const VOLUME: f32 = 3.0;
+const VOLUME: f32 = 1.0;
 /// Gain of the looping ambient track.
 const AMBIENT_VOLUME: f32 = 0.35;
 /// Audio formats accepted for custom sounds.
@@ -25,22 +25,31 @@ const EXTENSIONS: [&str; 4] = ["wav", "ogg", "mp3", "flac"];
 
 #[derive(Clone, Copy)]
 pub enum Sfx {
-    /// Keystroke click.
+    /// Keystroke: crushed digital tick.
     Key,
-    /// Heavier Enter key thunk.
+    /// Enter: distorted sub drop.
     Enter,
-    /// Short boot-log beep.
+    /// Boot log line: glitch stutter.
     Blip,
-    /// Rising "access granted" fanfare.
+    /// Boot complete: demonic power chord.
     Granted,
     /// File-browser click.
     Click,
-    /// Burst of quiet random data chirps.
+    /// Ambient data chatter, sometimes whispering.
     Chatter,
+    /// The eye opening: growl.
+    Awaken,
+    /// The eye blinking.
+    Blink,
+    /// Deep scan opened.
+    Scan,
 }
 
 impl Sfx {
-    const ALL: [Sfx; 6] = [Sfx::Key, Sfx::Enter, Sfx::Blip, Sfx::Granted, Sfx::Click, Sfx::Chatter];
+    const ALL: [Sfx; 9] = [
+        Sfx::Key, Sfx::Enter, Sfx::Blip, Sfx::Granted, Sfx::Click,
+        Sfx::Chatter, Sfx::Awaken, Sfx::Blink, Sfx::Scan,
+    ];
 
     /// File stem used to override this sound, e.g. `sounds/key.wav`.
     fn file_stem(self) -> &'static str {
@@ -51,6 +60,9 @@ impl Sfx {
             Sfx::Granted => "granted",
             Sfx::Click => "click",
             Sfx::Chatter => "chatter",
+            Sfx::Awaken => "awaken",
+            Sfx::Blink => "blink",
+            Sfx::Scan => "scan",
         }
     }
 }
@@ -189,32 +201,60 @@ impl Rng {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DSP building blocks
+// ---------------------------------------------------------------------------
+
+fn len(dur: f32) -> usize {
+    (dur * RATE as f32) as usize
+}
+
+fn silence(dur: f32) -> Vec<f32> {
+    vec![0.0; len(dur)]
+}
+
+/// Sine or square tone with exponential decay (`decay` = 0 holds the level).
 fn tone(freq: f32, dur: f32, vol: f32, decay: f32, square: bool) -> Vec<f32> {
-    let len = (dur * RATE as f32) as usize;
-    (0..len)
+    (0..len(dur))
         .map(|i| {
             let t = i as f32 / RATE as f32;
             let s = (TAU * freq * t).sin();
             let w = if square { s.signum() * 0.5 } else { s };
-            let attack = (i as f32 / 80.0).min(1.0);
+            let attack = (i as f32 / 60.0).min(1.0);
             w * vol * attack * (-t * decay).exp()
         })
         .collect()
 }
 
-/// High-passed white noise burst: sounds like a mechanical click.
-fn noise(rng: &mut Rng, dur: f32, vol: f32, decay: f32) -> Vec<f32> {
-    let len = (dur * RATE as f32) as usize;
-    let mut prev = 0.0;
-    (0..len)
+/// Detuned stack of sawtooth oscillators, normalized to `vol`.
+fn saws(freqs: &[f32], dur: f32, vol: f32) -> Vec<f32> {
+    let n = freqs.len() as f32;
+    (0..len(dur))
         .map(|i| {
             let t = i as f32 / RATE as f32;
-            let n = rng.next_f32() * 2.0 - 1.0;
-            let hp = n - prev;
-            prev = n;
-            hp * 0.5 * vol * (-t * decay).exp()
+            freqs.iter().map(|f| 2.0 * (t * f).fract() - 1.0).sum::<f32>() / n * vol
         })
         .collect()
+}
+
+/// Exponential pitch sweep with exponential decay.
+fn sweep(f0: f32, f1: f32, dur: f32, vol: f32, decay: f32, square: bool) -> Vec<f32> {
+    let n = len(dur);
+    let mut phase = 0.0_f32;
+    (0..n)
+        .map(|i| {
+            let u = i as f32 / n as f32;
+            let t = i as f32 / RATE as f32;
+            phase += TAU * f0 * (f1 / f0).powf(u) / RATE as f32;
+            let s = phase.sin();
+            let w = if square { s.signum() * 0.5 } else { s };
+            w * vol * (i as f32 / 60.0).min(1.0) * (-t * decay).exp()
+        })
+        .collect()
+}
+
+fn white(rng: &mut Rng, dur: f32, vol: f32) -> Vec<f32> {
+    (0..len(dur)).map(|_| (rng.next_f32() * 2.0 - 1.0) * vol).collect()
 }
 
 fn mix(mut a: Vec<f32>, b: Vec<f32>) -> Vec<f32> {
@@ -227,56 +267,191 @@ fn mix(mut a: Vec<f32>, b: Vec<f32>) -> Vec<f32> {
     a
 }
 
-/// Exponential frequency sweep with a smooth fade in and out.
-fn sweep(f0: f32, f1: f32, dur: f32, vol: f32) -> Vec<f32> {
-    let len = (dur * RATE as f32) as usize;
-    let mut phase = 0.0_f32;
-    (0..len)
-        .map(|i| {
-            let u = i as f32 / len as f32;
-            let f = f0 * (f1 / f0).powf(u);
-            phase += TAU * f / RATE as f32;
-            phase.sin() * vol * (PI_F * u).sin()
-        })
-        .collect()
+/// Soft clipping; `drive` > 1 adds grit.
+fn distort(v: &mut [f32], drive: f32) {
+    let norm = drive.tanh();
+    for s in v {
+        *s = (*s * drive).tanh() / norm;
+    }
 }
 
-const PI_F: f32 = std::f32::consts::PI;
-
-fn silence(dur: f32) -> Vec<f32> {
-    vec![0.0; (dur * RATE as f32) as usize]
+/// One-pole low-pass filter.
+fn lowpass(v: &mut [f32], cutoff: f32) {
+    let a = 1.0 - (-TAU * cutoff / RATE as f32).exp();
+    let mut y = 0.0;
+    for s in v {
+        y += a * (*s - y);
+        *s = y;
+    }
 }
+
+/// Crude band-pass: low-pass at `hi` minus low-pass at `lo`.
+fn bandpass(v: &mut [f32], lo: f32, hi: f32) {
+    let mut low = v.to_vec();
+    lowpass(&mut low, lo);
+    lowpass(v, hi);
+    for (s, l) in v.iter_mut().zip(low) {
+        *s -= l;
+    }
+}
+
+/// Sample-rate and bit-depth reduction: the "digital glitch" sound.
+fn bitcrush(v: &mut [f32], hold: usize, levels: f32) {
+    let mut held = 0.0;
+    for (i, s) in v.iter_mut().enumerate() {
+        if i % hold.max(1) == 0 {
+            held = (*s * levels).round() / levels;
+        }
+        *s = held;
+    }
+}
+
+/// Linear fade-in over `attack` seconds and fade-out over the last `release` seconds.
+fn envelope(v: &mut [f32], attack: f32, release: f32) {
+    let n = v.len() as f32;
+    for (i, s) in v.iter_mut().enumerate() {
+        let t = i as f32 / RATE as f32;
+        let rest = (n - i as f32) / RATE as f32;
+        *s *= (t / attack.max(1e-4)).min(1.0) * (rest / release.max(1e-4)).min(1.0);
+    }
+}
+
+/// Amplitude wobble at `rate` Hz: turns a drone into a growl.
+fn tremolo(v: &mut [f32], rate: f32, depth: f32) {
+    for (i, s) in v.iter_mut().enumerate() {
+        let t = i as f32 / RATE as f32;
+        *s *= 1.0 - depth * 0.5 * (1.0 + (TAU * rate * t).sin());
+    }
+}
+
+/// Feedback echo that extends the sound by a few repeats.
+fn echo(mut v: Vec<f32>, delay: f32, feedback: f32) -> Vec<f32> {
+    let d = len(delay).max(1);
+    v.resize(v.len() + d * 5, 0.0);
+    for i in d..v.len() {
+        v[i] += v[i - d] * feedback;
+    }
+    v
+}
+
+fn concat(parts: Vec<Vec<f32>>) -> Vec<f32> {
+    parts.into_iter().flatten().collect()
+}
+
+/// Breathy, band-limited noise with syllable-like pulses: an inhuman whisper.
+fn whisper(rng: &mut Rng, dur: f32, vol: f32) -> Vec<f32> {
+    let mut v = white(rng, dur, 1.0);
+    bandpass(&mut v, 500.0, 2600.0);
+    let syllables = rng.range(5.0, 9.0);
+    for (i, s) in v.iter_mut().enumerate() {
+        let t = i as f32 / RATE as f32;
+        *s *= vol * (0.5 + 0.5 * (TAU * syllables * t).sin()).powf(2.0);
+    }
+    envelope(&mut v, 0.15, 0.3);
+    v
+}
+
+// ---------------------------------------------------------------------------
+// The sounds: hacker glitch meets demonic low end
+// ---------------------------------------------------------------------------
 
 fn synth(sfx: Sfx, rng: &mut Rng) -> Vec<f32> {
     let mut out = match sfx {
-        // Soft, glassy tick.
+        // Bit-crushed digital tick over a tiny sub thump.
         Sfx::Key => {
-            let f = rng.range(2800.0, 3600.0);
-            mix(noise(rng, 0.02, 0.18, 260.0), tone(f, 0.04, 0.035, 120.0, false))
+            let mut tick = tone(rng.range(1600.0, 3400.0), 0.014, 0.22, 250.0, true);
+            bitcrush(&mut tick, 3, 5.0);
+            mix(tick, sweep(150.0, 55.0, 0.05, 0.3, 45.0, false))
         }
-        // Low "confirm" pulse.
-        Sfx::Enter => mix(tone(180.0, 0.12, 0.25, 28.0, false), tone(720.0, 0.08, 0.06, 45.0, false)),
-        Sfx::Blip => tone(rng.range(1400.0, 2600.0), 0.05, 0.05, 55.0, false),
-        Sfx::Click => mix(tone(1900.0, 0.05, 0.08, 70.0, false), tone(2850.0, 0.05, 0.04, 90.0, false)),
-        // Power-up: rising sweep resolving into a shimmering chord.
+        // Distorted sub drop with a metallic ring and a crunchy tail.
+        Sfx::Enter => {
+            let mut sub = sweep(140.0, 36.0, 0.38, 0.9, 8.0, false);
+            distort(&mut sub, 3.0);
+            let ring = mix(tone(337.0, 0.3, 0.07, 14.0, false), tone(913.0, 0.25, 0.04, 20.0, false));
+            let mut crunch = white(rng, 0.07, 0.2);
+            bitcrush(&mut crunch, 9, 4.0);
+            envelope(&mut crunch, 0.001, 0.06);
+            echo(mix(mix(sub, ring), crunch), 0.09, 0.28)
+        }
+        // Stuttering glitch burst.
+        Sfx::Blip => {
+            let f = rng.range(250.0, 1400.0);
+            let mut parts = Vec::new();
+            for k in 0..3 {
+                let mut seg = tone(f * (1.0 + k as f32 * 0.5), 0.012, 0.18, 0.0, true);
+                bitcrush(&mut seg, 4, 4.0);
+                parts.push(seg);
+                parts.push(silence(0.008));
+            }
+            mix(concat(parts), sweep(110.0, 50.0, 0.06, 0.22, 30.0, false))
+        }
+        // Clicking in the file browser: short crushed down-chirp.
+        Sfx::Click => {
+            let mut c = sweep(2400.0, 600.0, 0.05, 0.25, 40.0, true);
+            bitcrush(&mut c, 5, 5.0);
+            mix(c, sweep(120.0, 60.0, 0.05, 0.25, 40.0, false))
+        }
+        // Boot complete: a detuned, distorted power chord built on the tritone,
+        // a whisper, and a glitch arpeggio on top.
         Sfx::Granted => {
-            let mut v = sweep(180.0, 1400.0, 0.45, 0.12);
-            let chord = [880.0, 1108.7, 1318.5, 1760.0]
-                .iter()
-                .map(|&f| tone(f, 0.9, 0.05, 4.0, false))
-                .fold(Vec::new(), mix);
-            v.extend(chord);
-            v
+            let mut chord = saws(&[55.0, 55.4, 77.8, 82.4, 110.3, 116.5], 2.4, 0.9);
+            lowpass(&mut chord, 900.0);
+            distort(&mut chord, 2.5);
+            envelope(&mut chord, 0.3, 1.5);
+            let mut arp = Vec::new();
+            for f in [880.0, 1244.5, 1760.0, 2489.0, 1760.0] {
+                let mut n = tone(f, 0.06, 0.12, 25.0, true);
+                bitcrush(&mut n, 6, 5.0);
+                arp.extend(n);
+            }
+            let w = whisper(rng, 1.4, 0.25);
+            echo(mix(mix(chord, arp), w), 0.19, 0.32)
         }
-        // Quiet stream of "data" pips.
+        // The eye opens: a growling, swelling drone with breath.
+        Sfx::Awaken => {
+            let mut growl = saws(&[41.2, 43.7, 61.7, 82.4], 2.4, 1.0);
+            tremolo(&mut growl, 7.5, 0.55);
+            lowpass(&mut growl, 520.0);
+            distort(&mut growl, 4.0);
+            envelope(&mut growl, 1.0, 0.9);
+            let mut breath = white(rng, 2.0, 0.6);
+            lowpass(&mut breath, 650.0);
+            envelope(&mut breath, 0.8, 0.8);
+            let mut v = mix(growl, breath);
+            for s in &mut v {
+                *s *= 0.55;
+            }
+            echo(v, 0.27, 0.3)
+        }
+        // Eyelid: a soft low flap.
+        Sfx::Blink => {
+            let mut v = sweep(95.0, 45.0, 0.1, 0.45, 25.0, false);
+            distort(&mut v, 2.0);
+            mix(v, tone(2600.0, 0.006, 0.05, 400.0, false))
+        }
+        // Deep scan: rising crushed sweep over a demonic drone.
+        Sfx::Scan => {
+            let mut rise = sweep(180.0, 2600.0, 0.6, 0.18, 1.5, true);
+            bitcrush(&mut rise, 6, 6.0);
+            let mut drone = saws(&[55.0, 77.8], 0.8, 0.6);
+            lowpass(&mut drone, 600.0);
+            distort(&mut drone, 3.0);
+            envelope(&mut drone, 0.05, 0.5);
+            echo(mix(rise, drone), 0.12, 0.3)
+        }
+        // Ambient: modem-like data chatter, sometimes with a whisper underneath.
         Sfx::Chatter => {
             let mut v = Vec::new();
-            for _ in 0..(5 + (rng.next_f32() * 6.0) as usize) {
-                let f = rng.range(1800.0, 4200.0);
-                v.extend(tone(f, rng.range(0.02, 0.05), 0.018, 60.0, false));
-                v.extend(silence(rng.range(0.01, 0.05)));
+            for _ in 0..(6 + (rng.next_f32() * 8.0) as usize) {
+                let mut n = tone(rng.range(400.0, 3200.0), rng.range(0.01, 0.035), 0.06, 20.0, true);
+                bitcrush(&mut n, 6, 4.0);
+                v.extend(n);
+                v.extend(silence(rng.range(0.005, 0.04)));
             }
-            v
+            if rng.next_f32() < 0.35 {
+                v = mix(v, whisper(rng, 1.2, 0.12));
+            }
+            echo(v, 0.15, 0.25)
         }
     };
     for s in &mut out {
