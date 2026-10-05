@@ -15,6 +15,9 @@ chrono = "0.4"         # clock
 # Audio output; decoders (pure Rust) for user-supplied custom sounds.
 rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis", "flac", "symphonia-mp3"] }
 image = { version = "0.25", default-features = false, features = ["png"] }  # decode the app icon
+ureq = { version = "2", features = ["json"] }  # HTTPS client for the Claude API
+serde_json = "1"
+nokhwa = { version = "0.10", features = ["input-native"] }  # webcam capture (Media Foundation / AVFoundation / V4L2)
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"    # embed the icon into daemon.exe
@@ -28,6 +31,7 @@ resources = ["sounds"]
 category = "public.app-category.developer-tools"
 short_description = "2050-style holographic terminal and system monitor"
 osx_minimum_system_version = "11.0"
+osx_info_plist_exts = ["assets/Info.camera.plist"]  # camera permission prompt text
 
 [profile.release]
 opt-level = 3

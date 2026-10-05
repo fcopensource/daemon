@@ -139,6 +139,8 @@ Then `cargo run --release`.
 
 | Key | Action |
 |-----|--------|
+| <kbd>F6</kbd> | open / close the camera feed (<kbd>Esc</kbd> also closes it) |
+| <kbd>F7</kbd> | open / close the multi-model AI analysis panel |
 | <kbd>F8</kbd> | show / hide the holo keyboard |
 | <kbd>F9</kbd> | open / close the deep scan (<kbd>Esc</kbd> also closes it) |
 | <kbd>F10</kbd> | sound on / off |
@@ -201,6 +203,46 @@ Restart DAEMON, and **CONTROLS → CUSTOM SOUNDS** shows how many files it loade
 | `--mute` | `DAEMON_MUTE` | start with sound off |
 | `--fullscreen` | | start in fullscreen |
 | | `DAEMON_SHELL` | shell to launch, e.g. `pwsh`, `cmd.exe`, `/bin/zsh` |
+| | `*_API_KEY`, `*_MODEL` | AI provider keys and model overrides for the AI panel (F7), see below |
+
+### 🤖 Multi-model AI analysis (F7)
+
+Press <kbd>F7</kbd>, pick a model from the tabs and press **ASK**, or press **ANALYZE ALL** to send
+the same snapshot to every configured model at once and compare the answers (each tab shows ✓/✕
+and the reply time). DAEMON sends a short summary of CPU, memory, swap and disk usage. It only sends
+data when you press a button, and never includes the host name, user name, files or camera images.
+**DATA SENT** shows exactly what was sent.
+
+| Tab | API key variable | Model override (default) | Get a key |
+|-----|------------------|--------------------------|-----------|
+| CLAUDE | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` (`claude-opus-5-5`) | console.anthropic.com |
+| OPENAI | `OPENAI_API_KEY` | `OPENAI_MODEL` (`gpt-4o-mini`) | platform.openai.com |
+| GEMINI | `GEMINI_API_KEY` | `GEMINI_MODEL` (`gemini-2.5-flash`) | aistudio.google.com |
+| GROQ | `GROQ_API_KEY` | `GROQ_MODEL` (`llama-3.3-70b-versatile`) | console.groq.com |
+| MISTRAL | `MISTRAL_API_KEY` | `MISTRAL_MODEL` (`mistral-small-latest`) | console.mistral.ai |
+| DEEPSEEK | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL` (`deepseek-chat`) | platform.deepseek.com |
+| OPENROUTER | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` (`openrouter/auto`) | openrouter.ai |
+| OLLAMA (local) | none | `OLLAMA_MODEL` (`llama3.2`), server at `OLLAMA_HOST` | ollama.com |
+
+Set keys in your environment (never put them in the code):
+
+```sh
+setx GEMINI_API_KEY "..."          # Windows, then open a new terminal
+export GEMINI_API_KEY="..."        # macOS / Linux (add to ~/.zshrc to keep it)
+```
+
+Ollama runs models on your own machine with no key and no data leaving it: install it, run
+`ollama pull llama3.2`, and set `OLLAMA_MODEL` (or `OLLAMA_HOST`) so **ANALYZE ALL** includes it.
+Requests to cloud providers are billed to your account with that provider.
+
+### 📷 Camera (F6)
+
+Press <kbd>F6</kbd> to open the **OPTIC SENSOR** panel with a live webcam feed and holographic HUD.
+**SNAPSHOT** saves a PNG to `~/Pictures/DAEMON` (or your home folder), **NEXT CAMERA** switches
+between cameras, and **MIRROR** and **FILTER** change the view. The camera is only opened while the
+panel is open, and the top bar shows a red **CAM LIVE** indicator while it is on. Video never
+leaves your machine. On macOS, the first use asks for camera permission. If it was denied, allow
+it in System Settings → Privacy & Security → Camera.
 
 ---
 
@@ -242,6 +284,8 @@ flowchart LR
 | [`src/keyboard.rs`](src/keyboard.rs) | The translucent on-screen keyboard |
 | [`src/sound.rs`](src/sound.rs) | Sound synthesizer (distortion, bit-crush, echo) and custom-sound loader |
 | [`src/stats.rs`](src/stats.rs) | System statistics sampler and deep-scan report |
+| [`src/ai.rs`](src/ai.rs) | LLM providers (Claude, OpenAI-compatible APIs, Ollama) for the AI panel |
+| [`src/camera.rs`](src/camera.rs) | Webcam capture thread (nokhwa) and snapshots |
 | [`src/files.rs`](src/files.rs) | File browser |
 | [`src/widgets.rs`](src/widgets.rs) | Graphs, bars, glass backdrop, corner brackets |
 | [`src/theme.rs`](src/theme.rs) | Color themes |

@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, vec2, Align2, FontId, Margin, RichText, Sense, Stroke};
 
+use crate::ai::{self, Provider, SharedAi, Status, PROVIDERS};
+use crate::camera::{self, CamStatus, Camera};
 use crate::eye::{self, EyeState};
 use crate::files::{FileAction, FileBrowser};
 use crate::globe;
@@ -60,6 +62,22 @@ pub struct DaemonApp {
     show_keyboard: bool,
     /// Time the deep-scan overlay was opened, while it is open.
     scan_opened: Option<f64>,
+    /// Multi-model AI analysis panel (F7).
+    ai: SharedAi,
+    show_ai: bool,
+    /// Provider whose reply the AI panel shows.
+    ai_provider: Provider,
+    /// Camera feed panel (F6). The camera is only open while the panel is.
+    camera: Camera,
+    show_camera: bool,
+    cam_texture: Option<egui::TextureHandle>,
+    /// `seq` of the frame currently in `cam_texture`.
+    cam_seq: u64,
+    cam_mirror: bool,
+    cam_holo: bool,
+    /// Result of the last snapshot: (message, is_error).
+    cam_note: Option<(String, bool)>,
+    home: PathBuf,
     booted: bool,
     ctx: egui::Context,
 }
@@ -141,7 +159,7 @@ impl DaemonApp {
             net: stats::spawn_net_probe(ctx.clone()),
             term,
             term_err,
-            files: FileBrowser::new(start_dir),
+            files: FileBrowser::new(start_dir.clone()),
             sound: Sound::new(muted),
             rng: Rng(seed),
             last_key_sound: Instant::now(),
@@ -152,6 +170,17 @@ impl DaemonApp {
             keyboard: Keyboard::default(),
             show_keyboard: true,
             scan_opened: None,
+            ai: SharedAi::default(),
+            show_ai: false,
+            ai_provider: PROVIDERS.into_iter().find(|p| p.configured()).unwrap_or(Provider::Anthropic),
+            camera: Camera::default(),
+            show_camera: false,
+            cam_texture: None,
+            cam_seq: 0,
+            cam_mirror: true,
+            cam_holo: true,
+            cam_note: None,
+            home: start_dir,
             booted: false,
             ctx,
         }
@@ -345,6 +374,12 @@ impl DaemonApp {
                     pill(ui, "SOUND ON".into(), t.primary);
                 }
                 pill(ui, "DEEP SCAN [F9]".into(), t.alpha(200));
+                pill(ui, "AI [F7]".into(), t.alpha(200));
+                if self.camera.shared.lock().unwrap().status == CamStatus::Live {
+                    pill(ui, format!("{dot} CAM LIVE  [F6]"), t.alert);
+                } else {
+                    pill(ui, "CAMERA [F6]".into(), t.alpha(200));
+                }
             });
         });
     }
@@ -430,9 +465,342 @@ impl DaemonApp {
         w::kv(ui, t, "SOUND [F10]", if self.sound.muted() { "OFF" } else { "ON" });
         w::kv(ui, t, "CUSTOM SOUNDS", &self.sound.custom_count().to_string());
         w::kv(ui, t, "DEEP SCAN", "F9");
+        let ready = PROVIDERS.iter().filter(|p| p.configured()).count();
+        w::kv(ui, t, "AI MODELS [F7]", &format!("{ready} / {} READY", PROVIDERS.len()));
+        w::kv(ui, t, "CAMERA [F6]", if self.camera.running() { "LIVE" } else { "OFF" });
         w::kv(ui, t, "KEYBOARD [F8]", if self.show_keyboard { "ON" } else { "OFF" });
         w::kv(ui, t, "FULLSCREEN", "F11");
         w::kv(ui, t, "SCROLLBACK", "MOUSE WHEEL");
+    }
+
+    /// Floating "AI" panel: sends a CPU / memory / disk summary to one or more LLMs on request.
+    fn ai_panel(&mut self, ctx: &egui::Context, s: &Snapshot, time: f64) {
+        let t = self.theme;
+        let sel = self.ai_provider;
+        let state = self.ai.lock().unwrap().clone();
+        let run = state.run(sel);
+        let running = state.running(sel);
+        let configured: Vec<Provider> = PROVIDERS.into_iter().filter(|p| p.configured()).collect();
+        let screen = ctx.screen_rect();
+        let size = vec2(640.0_f32.min(screen.width() - 80.0), 560.0_f32.min(screen.height() - 120.0));
+        let rect = egui::Rect::from_center_size(screen.center(), size);
+        let spinner = ["◐", "◓", "◑", "◒"][(time * 6.0) as usize % 4];
+        let mut pick = None;
+        let mut start: Vec<Provider> = Vec::new();
+
+        egui::Area::new(egui::Id::new("ai_panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(rect, 10.0, t.bg.gamma_multiply(0.97));
+                ui.painter().rect_stroke(rect, 10.0, Stroke::new(1.0_f32, t.alpha(90)));
+                w::corners(ctx, rect.expand(4.0), t.accent_alpha(200));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink(16.0)), |ui| {
+                    w::header(ui, &t, "NEURAL LINK  //  MULTI-MODEL ANALYSIS", "F7 / ESC  CLOSE");
+
+                    // Provider tabs: ● ready, ○ not set up, ✓ answered, ✕ failed.
+                    ui.horizontal_wrapped(|ui| {
+                        for p in PROVIDERS {
+                            let mark = match state.runs.get(&p).map(|r| &r.status) {
+                                Some(Status::Running) => spinner,
+                                Some(Status::Done(_)) => "✓",
+                                Some(Status::Error(_)) => "✕",
+                                _ if p.configured() => "●",
+                                _ => "○",
+                            };
+                            let color = if p == sel {
+                                t.accent
+                            } else if p.configured() {
+                                t.primary
+                            } else {
+                                t.alpha(110)
+                            };
+                            let text = RichText::new(format!("{mark} {}", p.label())).color(color).size(11.0);
+                            if ui.selectable_label(p == sel, text).clicked() {
+                                pick = Some(p);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+
+                    w::kv(ui, &t, "MODEL", &sel.model());
+                    let key_state = if !sel.needs_key() {
+                        "NOT NEEDED (LOCAL)".to_string()
+                    } else if sel.key().is_some() {
+                        format!("SET ({})", sel.key_var())
+                    } else {
+                        format!("NOT SET ({})", sel.key_var())
+                    };
+                    w::kv(ui, &t, "API KEY", &key_state);
+                    if sel == Provider::Ollama {
+                        w::kv(ui, &t, "ENDPOINT", &sel.url());
+                    }
+                    ui.add_space(6.0);
+
+                    if sel.key().is_none() {
+                        let var = sel.key_var();
+                        ui.label(
+                            RichText::new(format!(
+                                "Set the {var} environment variable, then restart DAEMON.\n\n\
+                                 Windows:        setx {var} \"...\"\n\
+                                 macOS / Linux:  export {var}=\"...\"\n\n\
+                                 Create a key at {}. Override the model with {}.",
+                                sel.signup(),
+                                sel.model_var()
+                            ))
+                            .color(t.alpha(200)),
+                        );
+                        return;
+                    }
+
+                    ui.horizontal(|ui| {
+                        let button = |label: &str| {
+                            egui::Button::new(RichText::new(label).color(t.accent).size(13.0))
+                                .fill(t.accent_alpha(25))
+                                .stroke(Stroke::new(1.0_f32, t.accent_alpha(150)))
+                        };
+                        let label = if running { "ANALYZING…".to_string() } else { format!("▶ ASK {}", sel.label()) };
+                        if ui.add_enabled(!running, button(&label)).clicked() {
+                            start.push(sel);
+                        }
+                        let idle: Vec<Provider> = configured.iter().copied().filter(|&p| !state.running(p)).collect();
+                        let all = button(&format!("▶▶ ANALYZE ALL ({})", configured.len()));
+                        if ui.add_enabled(!idle.is_empty(), all).on_hover_text("Ask every configured model at once").clicked() {
+                            start.extend(idle);
+                        }
+                        if running {
+                            let dots = ".".repeat((time * 3.0) as usize % 3 + 1);
+                            ui.label(RichText::new(format!("waiting for {}{dots}", sel.label())).color(t.alpha(170)));
+                        } else if let Some(at) = run.finished_at {
+                            let took = run.took.map_or(String::new(), |d| format!(" in {:.1} s", d.as_secs_f32()));
+                            ui.label(RichText::new(format!("last run {}{took}", at.format("%H:%M:%S"))).color(t.alpha(130)).size(11.0));
+                        }
+                    });
+                    ui.label(
+                        RichText::new("Sends only CPU, memory and disk usage (no host name, user name, files or camera).")
+                            .color(t.alpha(110))
+                            .size(10.0),
+                    );
+                    ui.add_space(6.0);
+
+                    egui::ScrollArea::vertical().id_salt("ai_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                        match &run.status {
+                            Status::Idle => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Press ASK {} to analyze this machine's current load, or ANALYZE ALL to compare every configured model.",
+                                        sel.label()
+                                    ))
+                                    .color(t.alpha(160)),
+                                );
+                            }
+                            Status::Running => {}
+                            Status::Done(text) => {
+                                if run.model != sel.model() {
+                                    ui.label(RichText::new(format!("answered by {}", run.model)).color(t.alpha(120)).size(10.0));
+                                }
+                                ui.label(RichText::new(text).color(t.text));
+                            }
+                            Status::Error(e) => {
+                                ui.label(RichText::new(e).color(t.alert));
+                            }
+                        }
+                        if !run.sent.is_empty() {
+                            ui.add_space(8.0);
+                            ui.collapsing(RichText::new("DATA SENT").color(t.alpha(150)).size(11.0), |ui| {
+                                ui.label(RichText::new(&run.sent).color(t.alpha(150)).size(10.0));
+                            });
+                        }
+                    });
+                });
+            });
+
+        if let Some(p) = pick {
+            self.ai_provider = p;
+            self.sound.play(Sfx::Click);
+        }
+        let mut started = false;
+        for p in start {
+            started |= ai::analyze(&self.ai, p, s, ctx.clone());
+        }
+        if started {
+            self.sound.play(Sfx::Scan);
+        }
+    }
+
+    fn open_camera(&mut self) {
+        self.show_camera = true;
+        self.show_ai = false;
+        self.cam_note = None;
+        self.sound.play(Sfx::Awaken);
+        let index = self.camera.shared.lock().unwrap().active;
+        self.camera.start(index, self.ctx.clone());
+    }
+
+    /// Closing the panel releases the camera.
+    fn close_camera(&mut self) {
+        self.show_camera = false;
+        self.camera.stop();
+        self.cam_texture = None;
+    }
+
+    /// Floating "OPTIC SENSOR" panel: live webcam feed with a holographic HUD.
+    fn camera_panel(&mut self, ctx: &egui::Context, time: f64) {
+        let t = self.theme;
+        let st = self.camera.shared.lock().unwrap().clone();
+        if let Some(f) = st.frame.as_ref().filter(|_| st.seq != self.cam_seq) {
+            let img = egui::ColorImage::from_rgb([f.width as usize, f.height as usize], &f.rgb);
+            match &mut self.cam_texture {
+                Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                None => self.cam_texture = Some(ctx.load_texture("camera", img, egui::TextureOptions::LINEAR)),
+            }
+            self.cam_seq = st.seq;
+        }
+
+        let screen = ctx.screen_rect();
+        let size = vec2(800.0_f32.min(screen.width() - 80.0), 620.0_f32.min(screen.height() - 100.0));
+        let rect = egui::Rect::from_center_size(screen.center(), size);
+        let cam_on = self.camera.running();
+        let live = cam_on && st.status == CamStatus::Live;
+        let blink = (time * 2.0) as i64 % 2 == 0;
+        let (mut snap, mut next, mut toggle) = (false, false, false);
+        let (mut mirror, mut holo) = (self.cam_mirror, self.cam_holo);
+
+        egui::Area::new(egui::Id::new("camera_panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(rect, 10.0, t.bg.gamma_multiply(0.97));
+                ui.painter().rect_stroke(rect, 10.0, Stroke::new(1.0_f32, t.alpha(90)));
+                w::corners(ctx, rect.expand(4.0), t.accent_alpha(200));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink(16.0)), |ui| {
+                    w::header(ui, &t, "OPTIC SENSOR  //  CAMERA FEED", "F6 / ESC  CLOSE");
+                    let device = st.devices.get(st.active).cloned().unwrap_or_else(|| "--".into());
+                    let count = if st.devices.len() > 1 { format!("  ({}/{})", st.active + 1, st.devices.len()) } else { String::new() };
+                    w::kv(ui, &t, "DEVICE", &format!("{}{count}", truncate(&device, 40)));
+                    w::kv(ui, &t, "FORMAT", if st.format.is_empty() { "--" } else { &st.format });
+                    w::kv(ui, &t, "STREAM", &if live { format!("{:.0} FPS", st.fps) } else { "--".into() });
+                    ui.add_space(6.0);
+
+                    // Viewport: the feed, letterboxed to keep its aspect ratio.
+                    let view = ui.allocate_exact_size(vec2(ui.available_width(), ui.available_height() - 64.0), Sense::hover()).0;
+                    let p = ui.painter_at(view);
+                    p.rect_filled(view, 6.0, egui::Color32::BLACK);
+                    let feed = match (&self.cam_texture, &st.frame) {
+                        (Some(tex), Some(f)) if live => {
+                            let scale = (view.width() / f.width as f32).min(view.height() / f.height as f32);
+                            let r = egui::Rect::from_center_size(view.center(), vec2(f.width as f32, f.height as f32) * scale);
+                            let uv = if mirror {
+                                egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
+                            } else {
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                            };
+                            let tint = if holo { crate::theme::lerp_color(egui::Color32::WHITE, t.primary, 0.45) } else { egui::Color32::WHITE };
+                            p.image(tex.id(), r, uv, tint);
+                            Some(r)
+                        }
+                        _ => None,
+                    };
+
+                    match (feed, &st.status) {
+                        (Some(r), _) => {
+                            // HUD: scan sweep, scanlines, reticle, labels.
+                            if holo {
+                                let mut y = r.top();
+                                while y < r.bottom() {
+                                    p.hline(r.x_range(), y, Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40)));
+                                    y += 3.0;
+                                }
+                            }
+                            let sweep = r.top() + ((time * 0.35).fract() as f32) * r.height();
+                            p.hline(r.x_range(), sweep, Stroke::new(2.0_f32, t.accent_alpha(110)));
+                            let c = r.center();
+                            let rr = r.height().min(r.width()) * 0.12;
+                            p.circle_stroke(c, rr, Stroke::new(1.0_f32, t.accent_alpha(170)));
+                            w::arc(&p, c, rr * 1.35, time as f32, time as f32 + 1.2, Stroke::new(2.0_f32, t.accent_alpha(200)));
+                            w::arc(&p, c, rr * 1.35, time as f32 + TAU / 2.0, time as f32 + TAU / 2.0 + 1.2, Stroke::new(2.0_f32, t.accent_alpha(200)));
+                            for d in [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)] {
+                                p.line_segment([c + d * rr * 0.4, c + d * rr * 0.8], Stroke::new(1.0_f32, t.accent_alpha(200)));
+                            }
+                            let tl = r.left_top() + vec2(10.0, 10.0);
+                            if blink {
+                                p.circle_filled(tl + vec2(5.0, 7.0), 5.0, t.alert);
+                            }
+                            p.text(tl + vec2(16.0, 0.0), Align2::LEFT_TOP, "LIVE", FontId::monospace(13.0), t.alert);
+                            p.text(r.right_top() + vec2(-10.0, 10.0), Align2::RIGHT_TOP, "SUBJECT TRACKING", FontId::monospace(11.0), t.alpha(200));
+                            p.text(
+                                r.right_bottom() - vec2(10.0, 10.0),
+                                Align2::RIGHT_BOTTOM,
+                                chrono::Local::now().format("%Y.%m.%d  %H:%M:%S").to_string(),
+                                FontId::monospace(11.0),
+                                t.alpha(220),
+                            );
+                            w::corners(ctx, r.shrink(4.0), t.accent_alpha(220));
+                        }
+                        (None, CamStatus::Error(e)) => {
+                            p.text(view.center() - vec2(0.0, 12.0), Align2::CENTER_CENTER, "✕ OPTIC SENSOR OFFLINE", FontId::monospace(16.0), t.alert);
+                            p.text(view.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, truncate(e, 90), FontId::monospace(11.0), t.alpha(200));
+                        }
+                        (None, CamStatus::Off) => {
+                            p.text(view.center(), Align2::CENTER_CENTER, "CAMERA OFF  —  PRESS START", FontId::monospace(14.0), t.alpha(170));
+                        }
+                        (None, _) => {
+                            let dots = ".".repeat((time * 3.0) as usize % 3 + 1);
+                            p.text(view.center(), Align2::CENTER_CENTER, format!("INITIALIZING OPTIC SENSOR{dots}"), FontId::monospace(14.0), t.primary);
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let button = |label: &str, c: egui::Color32| {
+                            egui::Button::new(RichText::new(label).color(c).size(12.0))
+                                .fill(c.gamma_multiply(0.12))
+                                .stroke(Stroke::new(1.0_f32, c.gamma_multiply(0.6)))
+                        };
+                        snap = ui.add_enabled(live && st.frame.is_some(), button("◉ SNAPSHOT", t.accent)).clicked();
+                        if st.devices.len() > 1 {
+                            next = ui.add(button("⇄ NEXT CAMERA", t.primary)).clicked();
+                        }
+                        toggle = ui.add(button(if cam_on { "■ STOP" } else { "▶ START" }, if cam_on { t.alert } else { t.accent })).clicked();
+                        if ui.add(button(if mirror { "MIRROR: ON" } else { "MIRROR: OFF" }, t.alpha(200))).clicked() {
+                            mirror = !mirror;
+                        }
+                        if ui.add(button(if holo { "FILTER: HOLO" } else { "FILTER: RAW" }, t.alpha(200))).clicked() {
+                            holo = !holo;
+                        }
+                    });
+                    let note = match &self.cam_note {
+                        Some((msg, err)) => RichText::new(msg).color(if *err { t.alert } else { t.accent }),
+                        None => RichText::new("Video stays on this machine. The camera is released when this panel closes.").color(t.alpha(110)),
+                    };
+                    ui.label(note.size(10.0));
+                });
+            });
+
+        self.cam_mirror = mirror;
+        self.cam_holo = holo;
+        if snap {
+            if let Some(f) = &st.frame {
+                self.sound.play(Sfx::Click);
+                let dir = camera::snapshot_dir(&self.home);
+                self.cam_note = Some(match camera::save_snapshot(f, &dir) {
+                    Ok(path) => (format!("SNAPSHOT SAVED  →  {}", path.display()), false),
+                    Err(e) => (e, true),
+                });
+            }
+        }
+        if next {
+            self.sound.play(Sfx::Click);
+            self.camera.next(ctx.clone());
+        }
+        if toggle {
+            if self.camera.running() {
+                self.camera.stop();
+                self.cam_texture = None;
+            } else {
+                self.camera.start(st.active, ctx.clone());
+            }
+        }
     }
 
     /// Full-screen "deep scan" listing everything known about the machine.
@@ -534,6 +902,21 @@ impl eframe::App for DaemonApp {
         if key_pressed(&events, egui::Key::F8) {
             self.show_keyboard = !self.show_keyboard;
         }
+        if key_pressed(&events, egui::Key::F7) {
+            self.show_ai = !self.show_ai;
+            if self.show_ai && self.show_camera {
+                self.close_camera();
+            }
+        }
+        let escape = key_pressed(&events, egui::Key::Escape);
+        if key_pressed(&events, egui::Key::F6) || (self.show_camera && self.scan_opened.is_none() && escape) {
+            if self.show_camera {
+                self.close_camera();
+            } else {
+                self.open_camera();
+            }
+        }
+        let close_ai = self.show_ai && self.scan_opened.is_none() && escape;
         let close_scan = self.scan_opened.is_some() && key_pressed(&events, egui::Key::Escape);
         if key_pressed(&events, egui::Key::F9) || close_scan {
             self.scan_opened = match self.scan_opened {
@@ -545,8 +928,12 @@ impl eframe::App for DaemonApp {
             };
         }
 
-        // While the deep scan is open, keystrokes don't reach the shell.
-        if self.scan_opened.is_none() {
+        if close_ai {
+            self.show_ai = false;
+        }
+
+        // While an overlay is open, keystrokes don't reach the shell.
+        if self.scan_opened.is_none() && !self.show_ai && !self.show_camera {
             self.handle_input(&events);
             self.keyboard.observe(&events);
         }
@@ -639,6 +1026,13 @@ impl eframe::App for DaemonApp {
                 }
             })
         });
+
+        if self.show_ai {
+            self.ai_panel(ctx, &snap, time);
+        }
+        if self.show_camera {
+            self.camera_panel(ctx, time);
+        }
 
         if let Some(opened) = self.scan_opened {
             self.scan_overlay(ctx, &snap, opened, time);
