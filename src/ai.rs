@@ -498,6 +498,19 @@ mod tests {
         assert_eq!(Provider::Ollama.key(), Some(String::new()));
     }
 
+    /// Calls every configured provider for real. Run with `cargo test -- --ignored live_providers`.
+    #[test]
+    #[ignore]
+    fn live_providers_answer() {
+        let ready: Vec<_> = PROVIDERS.into_iter().filter(|p| p.configured()).collect();
+        assert!(!ready.is_empty(), "no provider configured; set e.g. OPENAI_API_KEY");
+        for p in ready {
+            let reply = call_api(p, &p.key().unwrap(), &p.model(), &summary(&snapshot()));
+            println!("{} ({}): {:?}", p.label(), p.model(), reply.as_ref().map(|r| r.chars().take(80).collect::<String>()));
+            assert!(reply.is_ok(), "{}: {reply:?}", p.label());
+        }
+    }
+
     #[test]
     fn ollama_host_parsing() {
         assert_eq!(ollama_base(None), "http://127.0.0.1:11434");
