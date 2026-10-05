@@ -325,3 +325,88 @@ fn build_intel(sys: &System, nets: &Networks, disks: &Disks, comps: &Components,
 
     out
 }
+
+/// Internet reachability, measured by a separate probe thread.
+#[derive(Clone, Default)]
+pub struct NetStatus {
+    /// `None` until the first probe finishes.
+    pub online: Option<bool>,
+    /// Round-trip time of the last successful TCP handshake.
+    pub latency_ms: Option<u32>,
+    pub latency_history: VecDeque<f32>,
+    /// When the connection last went up or down.
+    pub since: Option<chrono::DateTime<chrono::Local>>,
+}
+
+pub type SharedNet = Arc<Mutex<NetStatus>>;
+
+/// Hosts tried in order; a TCP handshake is enough, no data is sent.
+const PROBE_HOSTS: [&str; 2] = ["1.1.1.1:443", "8.8.8.8:443"];
+
+/// Latency of the first host that accepts a TCP connection, or `None` if all fail.
+fn probe_internet() -> Option<u32> {
+    PROBE_HOSTS.iter().find_map(|host| {
+        let addr: std::net::SocketAddr = host.parse().ok()?;
+        let start = Instant::now();
+        std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+            .ok()
+            .map(|_| start.elapsed().as_millis().min(u32::MAX as u128) as u32)
+    })
+}
+
+/// Checks internet connectivity every 5 seconds on its own thread.
+pub fn spawn_net_probe(ctx: egui::Context) -> SharedNet {
+    let shared: SharedNet = Arc::new(Mutex::new(NetStatus::default()));
+    let out = shared.clone();
+    thread::spawn(move || loop {
+        let latency = probe_internet();
+        {
+            let mut s = out.lock().unwrap();
+            let online = latency.is_some();
+            if s.online != Some(online) {
+                s.since = Some(chrono::Local::now());
+            }
+            s.online = Some(online);
+            s.latency_ms = latency;
+            push(&mut s.latency_history, latency.map_or(0.0, |l| l as f32));
+        }
+        ctx.request_repaint();
+        thread::sleep(Duration::from_secs(5));
+    });
+    shared
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pct_handles_zero_total() {
+        assert_eq!(pct(5, 0), "--");
+        assert_eq!(pct(1, 4), "25.0%");
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let mut h = VecDeque::new();
+        for i in 0..HISTORY + 10 {
+            push(&mut h, i as f32);
+        }
+        assert_eq!(h.len(), HISTORY);
+        assert_eq!(*h.back().unwrap(), (HISTORY + 9) as f32);
+    }
+
+    #[test]
+    fn loopback_names() {
+        assert!(is_loopback("lo"));
+        assert!(is_loopback("Loopback Pseudo-Interface 1"));
+        assert!(!is_loopback("Wi-Fi"));
+    }
+
+    #[test]
+    fn probe_hosts_parse() {
+        for h in PROBE_HOSTS {
+            assert!(h.parse::<std::net::SocketAddr>().is_ok(), "{h}");
+        }
+    }
+}

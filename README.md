@@ -75,6 +75,10 @@ type, with sticky Shift, Ctrl, Alt and Caps.
 CPU graph with a bar per core, memory grid, top processes, network up/down, storage, and a file
 browser where you click a folder to `cd` into it.
 
+### 🌐 Internet status
+A live **ONLINE / OFFLINE** indicator with connection latency and a latency graph. It checks every
+5 seconds by opening a TCP connection to 1.1.1.1 or 8.8.8.8, without sending any data.
+
 ### 🎨 2050 interface
 Floating glass panels, glowing corner brackets, gradient graphs, a drifting dot-grid backdrop and
 seven color themes.
@@ -197,6 +201,17 @@ Restart DAEMON, and **CONTROLS → CUSTOM SOUNDS** shows how many files it loade
 | `--mute` | `DAEMON_MUTE` | start with sound off |
 | `--fullscreen` | | start in fullscreen |
 | | `DAEMON_SHELL` | shell to launch, e.g. `pwsh`, `cmd.exe`, `/bin/zsh` |
+
+---
+
+## ✦ Tests
+
+```sh
+cargo test
+```
+
+Runs the unit tests for key mapping, the on-screen keyboard, sound synthesis, the eye animation,
+network helpers and formatting. No window opens.
 
 ---
 

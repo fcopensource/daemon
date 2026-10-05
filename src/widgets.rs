@@ -256,3 +256,30 @@ pub fn glitch_text(p: &egui::Painter, pos: Pos2, align: Align2, text: &str, font
     }
     p.text(pos, align, text, font, t.text);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_are_human_readable() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(1023), "1023 B");
+        assert_eq!(fmt_bytes(1024), "1.0 KB");
+        assert_eq!(fmt_bytes(1536 * 1024), "1.5 MB");
+        assert_eq!(fmt_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn durations_show_days_and_clock() {
+        assert_eq!(fmt_duration(0), "0d 00:00:00");
+        assert_eq!(fmt_duration(90061), "1d 01:01:01");
+    }
+
+    #[test]
+    fn truncate_counts_chars_not_bytes() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdefghij", 5), "abcd…");
+        assert_eq!(truncate("ééééé", 5), "ééééé");
+    }
+}

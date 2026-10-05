@@ -234,3 +234,51 @@ impl Keyboard {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn letters_respect_shift_and_caps() {
+        let mut k = Keyboard::default();
+        assert_eq!(k.press(Kind::Char('a', 'A')), Some(b"a".to_vec()));
+        k.press(Kind::Shift);
+        assert_eq!(k.press(Kind::Char('a', 'A')), Some(b"A".to_vec()));
+        // Shift is one-shot.
+        assert_eq!(k.press(Kind::Char('a', 'A')), Some(b"a".to_vec()));
+        k.press(Kind::Caps);
+        assert_eq!(k.press(Kind::Char('a', 'A')), Some(b"A".to_vec()));
+        // Shift inverts caps for letters only.
+        k.press(Kind::Shift);
+        assert_eq!(k.press(Kind::Char('a', 'A')), Some(b"a".to_vec()));
+        k.press(Kind::Shift);
+        assert_eq!(k.press(Kind::Char('1', '!')), Some(b"!".to_vec()));
+    }
+
+    #[test]
+    fn ctrl_and_alt_modify_the_next_key() {
+        let mut k = Keyboard::default();
+        k.press(Kind::Ctrl);
+        assert_eq!(k.press(Kind::Char('c', 'C')), Some(vec![0x03]));
+        k.press(Kind::Alt);
+        assert_eq!(k.press(Kind::Char('x', 'X')), Some(vec![0x1b, b'x']));
+        assert_eq!(k.press(Kind::Bytes("\r")), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn every_row_is_fifteen_units() {
+        for row in ROWS {
+            let w: f32 = row.iter().map(|k| k.w).sum();
+            assert!((w - 15.0).abs() < 1e-4, "row width {w}");
+        }
+    }
+
+    #[test]
+    fn typed_characters_map_to_keys() {
+        assert_eq!(char_label('q'), Some("Q"));
+        assert_eq!(char_label('?'), Some("/"));
+        assert_eq!(char_label(' '), Some("SPACE"));
+        assert_eq!(char_label('é'), None);
+    }
+}

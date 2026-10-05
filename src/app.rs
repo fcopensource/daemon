@@ -9,7 +9,7 @@ use crate::files::{FileAction, FileBrowser};
 use crate::globe;
 use crate::keyboard::Keyboard;
 use crate::sound::{Rng, Sfx, Sound};
-use crate::stats::{self, Shared, Snapshot};
+use crate::stats::{self, NetStatus, Shared, SharedNet, Snapshot};
 use crate::terminal::{self, Terminal};
 use crate::theme::Theme;
 use crate::widgets::{self as w, fmt_bytes, fmt_duration, truncate};
@@ -44,6 +44,7 @@ const BLINKS: [f32; 2] = [3.3, 3.85];
 pub struct DaemonApp {
     theme: Theme,
     stats: Shared,
+    net: SharedNet,
     term: Option<Terminal>,
     term_err: Option<String>,
     files: FileBrowser,
@@ -106,6 +107,14 @@ fn glass<R>(ui: &mut egui::Ui, t: &Theme, add: impl FnOnce(&mut egui::Ui) -> R) 
         .inner
 }
 
+fn internet_label(net: &NetStatus) -> &'static str {
+    match net.online {
+        Some(true) => "ONLINE",
+        Some(false) => "OFFLINE",
+        None => "CHECKING…",
+    }
+}
+
 fn key_pressed(events: &[egui::Event], key: egui::Key) -> bool {
     events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, .. } if *k == key))
 }
@@ -129,6 +138,7 @@ impl DaemonApp {
         Self {
             theme,
             stats: stats::spawn(ctx.clone()),
+            net: stats::spawn_net_probe(ctx.clone()),
             term,
             term_err,
             files: FileBrowser::new(start_dir),
@@ -321,7 +331,12 @@ impl DaemonApp {
                 let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
                 ui.label(RichText::new(format!("{user}@{}", s.hostname)).color(t.alpha(170)).size(11.0));
                 let dot = if (time * 1.5) as i64 % 2 == 0 { "●" } else { "○" };
-                pill(ui, format!("{dot} SECURE LINK"), t.accent);
+                let net = self.net.lock().unwrap().clone();
+                match (net.online, net.latency_ms) {
+                    (Some(true), Some(ms)) => pill(ui, format!("{dot} ONLINE  {ms} ms"), t.accent),
+                    (Some(false), _) => pill(ui, "✕ OFFLINE".into(), t.alert),
+                    _ => pill(ui, "… CHECKING LINK".into(), t.alpha(180)),
+                }
                 if !self.sound.available() {
                     pill(ui, "NO AUDIO".into(), t.alert);
                 } else if self.sound.muted() {
@@ -376,13 +391,22 @@ impl DaemonApp {
 
     fn right_panel(&self, ui: &mut egui::Ui, s: &Snapshot, time: f64) {
         let t = &self.theme;
-        let online = s.rx_total + s.tx_total > 0;
+        let net = self.net.lock().unwrap().clone();
+        let online = net.online == Some(true);
 
         w::header(ui, t, "GLOBAL NETWORK", if online { "TRACKING" } else { "NO SIGNAL" });
         globe::globe(ui, t, time, 250.0);
 
         w::header(ui, t, "NETWORK STATUS", &s.net_iface);
-        w::kv(ui, t, "STATE", if online { "ONLINE" } else { "OFFLINE" });
+        w::kv(ui, t, "INTERNET", internet_label(&net));
+        w::kv(ui, t, "LATENCY", &net.latency_ms.map_or("--".into(), |l| format!("{l} ms")));
+        if let Some(since) = net.since {
+            w::kv(ui, t, if online { "ONLINE SINCE" } else { "OFFLINE SINCE" }, &since.format("%H:%M:%S").to_string());
+        }
+        let max_latency = net.latency_history.iter().cloned().fold(50.0_f32, f32::max);
+        ui.add_space(4.0);
+        w::graph(ui, t, &[(&net.latency_history, if online { t.accent } else { t.alert })], max_latency * 1.2, 32.0);
+        ui.add_space(4.0);
         w::kv(ui, t, "DOWNLOAD", &format!("{}/s", fmt_bytes(s.rx_rate)));
         w::kv(ui, t, "UPLOAD", &format!("{}/s", fmt_bytes(s.tx_rate)));
         let max = s.rx_history.iter().chain(s.tx_history.iter()).cloned().fold(1024.0_f32, f32::max);
@@ -417,6 +441,16 @@ impl DaemonApp {
         let screen = ctx.screen_rect();
         let ppp = ctx.pixels_per_point();
         let mut sections = s.intel.clone();
+        let net = self.net.lock().unwrap().clone();
+        sections.push((
+            "CONNECTIVITY".to_string(),
+            vec![
+                ("INTERNET".into(), internet_label(&net).into()),
+                ("LATENCY".into(), net.latency_ms.map_or("--".into(), |l| format!("{l} ms"))),
+                ("STATE SINCE".into(), net.since.map_or("--".into(), |d| d.format("%Y-%m-%d %H:%M:%S").to_string())),
+                ("PROBE".into(), "TCP handshake to 1.1.1.1 / 8.8.8.8 every 5 s".into()),
+            ],
+        ));
         sections.push((
             "DISPLAY".to_string(),
             vec![

@@ -312,3 +312,46 @@ fn ansi(idx: u8) -> Color32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Key, Modifiers};
+
+    fn key(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn text_and_special_keys() {
+        assert_eq!(event_to_bytes(&Event::Text("hi".into()), false), Some(b"hi".to_vec()));
+        assert_eq!(event_to_bytes(&key(Key::Enter, Modifiers::NONE), false), Some(b"\r".to_vec()));
+        assert_eq!(event_to_bytes(&key(Key::Backspace, Modifiers::NONE), false), Some(vec![0x7f]));
+        assert_eq!(event_to_bytes(&key(Key::Tab, Modifiers::SHIFT), false), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(event_to_bytes(&key(Key::F9, Modifiers::NONE), false), None);
+    }
+
+    #[test]
+    fn arrows_follow_cursor_mode() {
+        assert_eq!(event_to_bytes(&key(Key::ArrowUp, Modifiers::NONE), false), Some(b"\x1b[A".to_vec()));
+        assert_eq!(event_to_bytes(&key(Key::ArrowUp, Modifiers::NONE), true), Some(b"\x1bOA".to_vec()));
+    }
+
+    #[test]
+    fn ctrl_letters_become_control_codes() {
+        assert_eq!(event_to_bytes(&key(Key::D, Modifiers::CTRL), false), Some(vec![0x04]));
+        assert_eq!(event_to_bytes(&key(Key::L, Modifiers::CTRL), false), Some(vec![0x0c]));
+    }
+
+    #[test]
+    fn paste_normalizes_newlines() {
+        assert_eq!(event_to_bytes(&Event::Paste("a\r\nb\nc".into()), false), Some(b"a\rb\rc".to_vec()));
+    }
+
+    #[test]
+    fn palette_endpoints() {
+        assert_eq!(ansi(0), Color32::from_rgb(0, 0, 0));
+        assert_eq!(ansi(231), Color32::from_rgb(255, 255, 255));
+        assert_eq!(ansi(232), Color32::from_rgb(8, 8, 8));
+    }
+}

@@ -221,3 +221,29 @@ pub fn ease(x: f32, a: f32, b: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ease_is_clamped_smoothstep() {
+        assert_eq!(ease(-1.0, 0.0, 1.0), 0.0);
+        assert_eq!(ease(2.0, 0.0, 1.0), 1.0);
+        assert!((ease(0.5, 0.0, 1.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn blink_closes_briefly_then_reopens() {
+        assert_eq!(blink(3.0, 5.0), 1.0);
+        assert!(blink(5.11, 5.0) < 0.1);
+        assert!(blink(5.21, 5.0) > 0.8);
+    }
+
+    #[test]
+    fn lid_profile_is_zero_at_corners() {
+        assert_eq!(profile(-1.0), 0.0);
+        assert_eq!(profile(1.0), 0.0);
+        assert_eq!(profile(0.0), 1.0);
+    }
+}

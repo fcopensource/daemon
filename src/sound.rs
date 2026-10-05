@@ -296,11 +296,16 @@ fn bandpass(v: &mut [f32], lo: f32, hi: f32) {
 }
 
 /// Sample-rate and bit-depth reduction: the "digital glitch" sound.
+/// Quantizes relative to the signal's peak, so quiet sounds keep their shape.
 fn bitcrush(v: &mut [f32], hold: usize, levels: f32) {
+    let peak = v.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+    if peak == 0.0 {
+        return;
+    }
     let mut held = 0.0;
     for (i, s) in v.iter_mut().enumerate() {
         if i % hold.max(1) == 0 {
-            held = (*s * levels).round() / levels;
+            held = (*s / peak * levels).round() / levels * peak;
         }
         *s = held;
     }
@@ -458,4 +463,37 @@ fn synth(sfx: Sfx, rng: &mut Rng) -> Vec<f32> {
         *s = s.clamp(-1.0, 1.0);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_sound_is_audible_and_in_range() {
+        let mut rng = Rng(42);
+        for sfx in Sfx::ALL {
+            let s = synth(sfx, &mut rng);
+            assert!(!s.is_empty(), "{} is empty", sfx.file_stem());
+            assert!(s.iter().all(|x| x.is_finite() && x.abs() <= 1.0), "{} out of range", sfx.file_stem());
+            assert!(s.iter().any(|x| x.abs() > 0.01), "{} is silent", sfx.file_stem());
+        }
+    }
+
+    #[test]
+    fn file_stems_are_unique() {
+        let mut stems: Vec<_> = Sfx::ALL.iter().map(|s| s.file_stem()).collect();
+        stems.sort();
+        stems.dedup();
+        assert_eq!(stems.len(), Sfx::ALL.len());
+    }
+
+    #[test]
+    fn rng_stays_in_unit_interval() {
+        let mut rng = Rng(7);
+        for _ in 0..10_000 {
+            let x = rng.next_f32();
+            assert!((0.0..1.0).contains(&x));
+        }
+    }
 }
