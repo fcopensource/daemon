@@ -37,7 +37,7 @@ pub struct CamState {
     pub devices: Vec<String>,
     /// Index into `devices` of the camera in use.
     pub active: usize,
-    /// e.g. "1280×720 · 30 FPS · MJPEG"
+    /// e.g. "1280×720 · NV12"
     pub format: String,
     pub frame: Option<Arc<Frame>>,
     /// Incremented for every new frame, so the UI only re-uploads changed frames.
@@ -117,11 +117,13 @@ impl Drop for Camera {
 
 /// Formats to try, best first. `Camera::new` fails when a request matches no
 /// format the device offers, so we fall back to whatever the device can do.
-fn requests() -> [RequestedFormat<'static>; 3] {
+/// Many laptop webcams (e.g. HP FHD Camera on Media Foundation) offer only NV12.
+fn requests() -> [RequestedFormat<'static>; 4] {
     let hd = |f| RequestedFormatType::Closest(CameraFormat::new(Resolution::new(1280, 720), f, 30));
     [
         RequestedFormat::new::<RgbFormat>(hd(FrameFormat::MJPEG)),
         RequestedFormat::new::<RgbFormat>(hd(FrameFormat::YUYV)),
+        RequestedFormat::new::<RgbFormat>(hd(FrameFormat::NV12)),
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
     ]
 }
@@ -168,7 +170,8 @@ fn capture(index: usize, shared: &SharedCam, stop: &AtomicBool, ctx: &egui::Cont
     let fmt = cam.camera_format();
     {
         let mut st = shared.lock().unwrap();
-        st.format = format!("{}×{} · {} FPS · {}", fmt.width(), fmt.height(), fmt.frame_rate(), fmt.format());
+        // The reported frame rate is unreliable on Media Foundation; the UI shows the measured one.
+        st.format = format!("{}×{} · {}", fmt.width(), fmt.height(), fmt.format());
         st.status = CamStatus::Live;
     }
 
@@ -253,6 +256,31 @@ mod tests {
         std::fs::create_dir_all(home.join("Pictures")).unwrap();
         assert_eq!(snapshot_dir(&home), home.join("Pictures").join("DAEMON"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Opens the real default camera. Run with `cargo test -- --ignored live_camera`.
+    #[test]
+    #[ignore]
+    fn live_camera_captures_a_frame() {
+        let mut cam = Camera::default();
+        cam.start(0, egui::Context::default());
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let st = cam.shared.lock().unwrap().clone();
+            if let CamStatus::Error(e) = &st.status {
+                panic!("camera error: {e}");
+            }
+            if let Some(f) = &st.frame {
+                println!("{:?} {} on {:?}: {}x{}", st.status, st.format, st.devices, f.width, f.height);
+                assert_eq!(f.rgb.len(), (f.width * f.height * 3) as usize);
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                println!("measured {:.1} FPS", cam.shared.lock().unwrap().fps);
+                break;
+            }
+            assert!(Instant::now() < deadline, "no frame within 15 s, status {:?}", st.status);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        cam.stop();
     }
 
     #[test]

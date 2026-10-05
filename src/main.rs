@@ -8,6 +8,7 @@ mod eye;
 mod files;
 mod globe;
 mod keyboard;
+mod scan;
 mod sound;
 mod stats;
 mod terminal;

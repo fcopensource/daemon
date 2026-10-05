@@ -8,6 +8,7 @@ use crate::ai::{self, Provider, SharedAi, Status, PROVIDERS};
 use crate::camera::{self, CamStatus, Camera};
 use crate::eye::{self, EyeState};
 use crate::files::{FileAction, FileBrowser};
+use crate::scan::{ScanKind, ScanStatus, Scanner};
 use crate::globe;
 use crate::keyboard::Keyboard;
 use crate::sound::{Rng, Sfx, Sound};
@@ -78,6 +79,9 @@ pub struct DaemonApp {
     /// Result of the last snapshot: (message, is_error).
     cam_note: Option<(String, bool)>,
     home: PathBuf,
+    /// Malware scan panel (F5). Scans keep running when the panel is closed.
+    scanner: Scanner,
+    show_threats: bool,
     booted: bool,
     ctx: egui::Context,
 }
@@ -133,6 +137,26 @@ fn internet_label(net: &NetStatus) -> &'static str {
     }
 }
 
+/// Stopwatch time: "03:12", or "1:03:12" past an hour.
+fn clock(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+/// Something the user can trigger with a function key or by clicking a top-bar pill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Action {
+    Threats,
+    Camera,
+    Ai,
+    DeepScan,
+    Sound,
+}
+
 fn key_pressed(events: &[egui::Event], key: egui::Key) -> bool {
     events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, .. } if *k == key))
 }
@@ -181,6 +205,8 @@ impl DaemonApp {
             cam_holo: true,
             cam_note: None,
             home: start_dir,
+            scanner: Scanner::default(),
+            show_threats: false,
             booted: false,
             ctx,
         }
@@ -340,10 +366,20 @@ impl DaemonApp {
         ctx.request_repaint();
     }
 
-    fn top_bar(&self, ui: &mut egui::Ui, s: &Snapshot, time: f64) {
+    /// Returns the action of a clicked status pill, so every panel can be opened with the
+    /// mouse (on many laptops F1–F12 are media keys unless Fn is held).
+    fn top_bar(&self, ui: &mut egui::Ui, s: &Snapshot, time: f64) -> Option<Action> {
         let t = &self.theme;
+        let mut clicked = None;
         let pill = |ui: &mut egui::Ui, text: String, c: egui::Color32| {
             ui.label(RichText::new(format!("  {text}  ")).color(c).background_color(c.gamma_multiply(0.14)).size(11.0));
+        };
+        let button = |ui: &mut egui::Ui, text: String, c: egui::Color32, action: Action, clicked: &mut Option<Action>| {
+            let label = egui::Label::new(RichText::new(format!("  {text}  ")).color(c).background_color(c.gamma_multiply(0.14)).size(11.0))
+                .sense(Sense::click());
+            if ui.add(label).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *clicked = Some(action);
+            }
         };
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(110.0, 22.0), Sense::hover());
@@ -369,19 +405,31 @@ impl DaemonApp {
                 if !self.sound.available() {
                     pill(ui, "NO AUDIO".into(), t.alert);
                 } else if self.sound.muted() {
-                    pill(ui, "SOUND OFF  [F10]".into(), t.alert);
+                    button(ui, "SOUND OFF  [F10]".into(), t.alert, Action::Sound, &mut clicked);
                 } else {
-                    pill(ui, "SOUND ON".into(), t.primary);
+                    button(ui, "SOUND ON  [F10]".into(), t.primary, Action::Sound, &mut clicked);
                 }
-                pill(ui, "DEEP SCAN [F9]".into(), t.alpha(200));
-                pill(ui, "AI [F7]".into(), t.alpha(200));
+                button(ui, "DEEP SCAN [F9]".into(), t.alpha(200), Action::DeepScan, &mut clicked);
+                button(ui, "AI [F7]".into(), t.alpha(200), Action::Ai, &mut clicked);
                 if self.camera.shared.lock().unwrap().status == CamStatus::Live {
-                    pill(ui, format!("{dot} CAM LIVE  [F6]"), t.alert);
+                    button(ui, format!("{dot} CAM LIVE  [F6]"), t.alert, Action::Camera, &mut clicked);
                 } else {
-                    pill(ui, "CAMERA [F6]".into(), t.alpha(200));
+                    button(ui, "CAMERA [F6]".into(), t.alpha(200), Action::Camera, &mut clicked);
+                }
+                let scan = self.scanner.shared.lock().unwrap().clone();
+                match (&scan.status, scan.started) {
+                    (ScanStatus::Running, Some(at)) => {
+                        let text = format!("{dot} SCANNING {}  [F5]", clock(at.elapsed().as_secs()));
+                        button(ui, text, t.accent, Action::Threats, &mut clicked);
+                    }
+                    (ScanStatus::Threats(list), _) => {
+                        button(ui, format!("⚠ {} THREATS  [F5]", list.len()), t.alert, Action::Threats, &mut clicked);
+                    }
+                    _ => button(ui, "THREAT SCAN [F5]".into(), t.alpha(200), Action::Threats, &mut clicked),
                 }
             });
         });
+        clicked
     }
 
     fn left_panel(&self, ui: &mut egui::Ui, s: &Snapshot) {
@@ -468,6 +516,7 @@ impl DaemonApp {
         let ready = PROVIDERS.iter().filter(|p| p.configured()).count();
         w::kv(ui, t, "AI MODELS [F7]", &format!("{ready} / {} READY", PROVIDERS.len()));
         w::kv(ui, t, "CAMERA [F6]", if self.camera.running() { "LIVE" } else { "OFF" });
+        w::kv(ui, t, "THREAT SCAN", "F5");
         w::kv(ui, t, "KEYBOARD [F8]", if self.show_keyboard { "ON" } else { "OFF" });
         w::kv(ui, t, "FULLSCREEN", "F11");
         w::kv(ui, t, "SCROLLBACK", "MOUSE WHEEL");
@@ -628,9 +677,57 @@ impl DaemonApp {
         }
     }
 
-    fn open_camera(&mut self) {
-        self.show_camera = true;
+    fn overlay_open(&self) -> bool {
+        self.scan_opened.is_some() || self.show_ai || self.show_camera || self.show_threats
+    }
+
+    /// Opens or closes a panel; opening one floating panel closes the others.
+    fn act(&mut self, action: Action, time: f64) {
+        match action {
+            Action::Sound => self.sound.toggle_mute(),
+            Action::DeepScan => {
+                self.scan_opened = match self.scan_opened {
+                    Some(_) => None,
+                    None => {
+                        self.sound.play(Sfx::Scan);
+                        Some(time)
+                    }
+                };
+            }
+            Action::Camera => {
+                if self.show_camera {
+                    self.close_camera();
+                } else {
+                    self.open_camera();
+                }
+            }
+            Action::Ai => {
+                let open = !self.show_ai;
+                self.close_floating();
+                self.show_ai = open;
+            }
+            Action::Threats => {
+                let open = !self.show_threats;
+                self.close_floating();
+                self.show_threats = open;
+                if open {
+                    self.scanner.refresh_protection(self.ctx.clone());
+                }
+            }
+        }
+    }
+
+    fn close_floating(&mut self) {
+        if self.show_camera {
+            self.close_camera();
+        }
         self.show_ai = false;
+        self.show_threats = false;
+    }
+
+    fn open_camera(&mut self) {
+        self.close_floating();
+        self.show_camera = true;
         self.cam_note = None;
         self.sound.play(Sfx::Awaken);
         let index = self.camera.shared.lock().unwrap().active;
@@ -803,6 +900,133 @@ impl DaemonApp {
         }
     }
 
+    /// Floating "THREAT SCAN" panel: antivirus status and quick / full malware scans.
+    fn threats_panel(&mut self, ctx: &egui::Context, time: f64) {
+        let t = self.theme;
+        let st = self.scanner.shared.lock().unwrap().clone();
+        let running = st.status == ScanStatus::Running;
+        let screen = ctx.screen_rect();
+        let size = vec2(680.0_f32.min(screen.width() - 80.0), 580.0_f32.min(screen.height() - 100.0));
+        let rect = egui::Rect::from_center_size(screen.center(), size);
+        let (mut start, mut cancel) = (None, false);
+
+        egui::Area::new(egui::Id::new("threat_scan"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(rect, 10.0, t.bg.gamma_multiply(0.97));
+                ui.painter().rect_stroke(rect, 10.0, Stroke::new(1.0_f32, t.alpha(90)));
+                w::corners(ctx, rect.expand(4.0), t.accent_alpha(200));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink(16.0)), |ui| {
+                    let engine = if st.engine.is_empty() { if cfg!(windows) { "MICROSOFT DEFENDER" } else { "CLAMAV" }.to_string() } else { st.engine.to_uppercase() };
+                    w::header(ui, &t, "THREAT SCAN  //  MALWARE DETECTION", "F5 / ESC  CLOSE");
+                    w::kv(ui, &t, "ENGINE", &engine);
+                    if st.protection.is_empty() {
+                        w::kv(ui, &t, "PROTECTION", "QUERYING…");
+                    }
+                    for (k, v, ok) in &st.protection {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(k).color(t.alpha(150)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(v).color(if *ok { t.text } else { t.alert }));
+                            });
+                        });
+                    }
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        let button = |label: &str, c: egui::Color32| {
+                            egui::Button::new(RichText::new(label).color(c).size(13.0))
+                                .fill(c.gamma_multiply(0.12))
+                                .stroke(Stroke::new(1.0_f32, c.gamma_multiply(0.6)))
+                        };
+                        if ui.add_enabled(!running, button("▶ QUICK SCAN", t.accent)).on_hover_text("Places malware usually hides: a few minutes").clicked() {
+                            start = Some(ScanKind::Quick);
+                        }
+                        if ui.add_enabled(!running, button("▶▶ FULL SYSTEM SCAN", t.accent)).on_hover_text("Every file on every drive: can take an hour or more").clicked() {
+                            start = Some(ScanKind::Full);
+                        }
+                        if running && ui.add(button("■ CANCEL", t.alert)).clicked() {
+                            cancel = true;
+                        }
+                    });
+                    ui.add_space(8.0);
+
+                    // Status display.
+                    let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::hover());
+                    let p = ui.painter_at(area);
+                    let c = area.left_center() + vec2(48.0, 0.0);
+                    let (title, detail, color) = match &st.status {
+                        ScanStatus::Idle => ("READY".to_string(), "Choose a quick scan or a full system scan.".to_string(), t.alpha(180)),
+                        ScanStatus::Running => {
+                            let kind = st.kind.map_or("SCAN", ScanKind::label);
+                            let elapsed = st.started.map_or(0, |s| s.elapsed().as_secs());
+                            (format!("{kind} IN PROGRESS  {}", clock(elapsed)), "You can close this panel; the scan keeps running.".to_string(), t.accent)
+                        }
+                        ScanStatus::Clean => ("✓ NO THREATS FOUND".to_string(), format!("{} finished cleanly.", st.kind.map_or("Scan", ScanKind::label)), t.accent),
+                        ScanStatus::Threats(list) => (format!("⚠ {} THREAT(S) DETECTED", list.len()), "Review them below and remove them in Windows Security / your antivirus.".to_string(), t.alert),
+                        ScanStatus::Cancelled => ("SCAN CANCELLED".to_string(), String::new(), t.alpha(180)),
+                        ScanStatus::Error(e) => ("✕ SCAN FAILED".to_string(), e.clone(), t.alert),
+                    };
+                    // Radar: sweeps while scanning, solid when done.
+                    p.circle_stroke(c, 36.0, Stroke::new(1.0_f32, color.gamma_multiply(0.6)));
+                    p.circle_stroke(c, 22.0, Stroke::new(1.0_f32, color.gamma_multiply(0.4)));
+                    if running {
+                        let a = time as f32 * 2.5;
+                        for k in 0..12 {
+                            let a0 = a - k as f32 * 0.08;
+                            w::arc(&p, c, 30.0, a0, a0 + 0.08, Stroke::new(12.0_f32, color.gamma_multiply(1.0 - k as f32 / 12.0)));
+                        }
+                    } else {
+                        p.circle_filled(c, 10.0, color.gamma_multiply(0.8));
+                    }
+                    let x = area.left() + 104.0;
+                    p.text(egui::pos2(x, area.center().y - 12.0), Align2::LEFT_CENTER, title, FontId::monospace(18.0), color);
+                    p.text(egui::pos2(x, area.center().y + 14.0), Align2::LEFT_CENTER, truncate(&detail, 70), FontId::monospace(11.0), t.alpha(190));
+                    if let (Some(took), Some(at)) = (st.took, st.finished_at) {
+                        if !running {
+                            p.text(area.right_top(), Align2::RIGHT_TOP, format!("{}  ·  took {}", at.format("%H:%M:%S"), clock(took.as_secs())), FontId::monospace(10.0), t.alpha(130));
+                        }
+                    }
+
+                    egui::ScrollArea::vertical().id_salt("threat_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                        if let ScanStatus::Threats(list) = &st.status {
+                            for th in list {
+                                ui.label(RichText::new(format!("⚠ {}", th.name)).color(t.alert));
+                                if !th.path.is_empty() {
+                                    ui.label(RichText::new(format!("   {}", th.path)).color(t.alpha(180)).size(10.0));
+                                }
+                            }
+                        }
+                        if let ScanStatus::Error(e) = &st.status {
+                            ui.label(RichText::new(e).color(t.alert).size(11.0));
+                        }
+                        if !st.log.trim().is_empty() {
+                            ui.add_space(6.0);
+                            ui.collapsing(RichText::new("ENGINE OUTPUT").color(t.alpha(150)).size(11.0), |ui| {
+                                ui.label(RichText::new(st.log.trim()).color(t.alpha(150)).size(10.0));
+                            });
+                        }
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("DAEMON only reports what the antivirus engine finds; it does not delete or quarantine files itself.")
+                                .color(t.alpha(110))
+                                .size(10.0),
+                        );
+                    });
+                });
+            });
+
+        if let Some(kind) = start {
+            self.sound.play(Sfx::Scan);
+            self.scanner.start(kind, ctx.clone());
+        }
+        if cancel {
+            self.sound.play(Sfx::Click);
+            self.scanner.cancel();
+        }
+    }
+
     /// Full-screen "deep scan" listing everything known about the machine.
     fn scan_overlay(&self, ctx: &egui::Context, s: &Snapshot, opened: f64, time: f64) {
         let t = self.theme;
@@ -902,38 +1126,31 @@ impl eframe::App for DaemonApp {
         if key_pressed(&events, egui::Key::F8) {
             self.show_keyboard = !self.show_keyboard;
         }
-        if key_pressed(&events, egui::Key::F7) {
-            self.show_ai = !self.show_ai;
-            if self.show_ai && self.show_camera {
-                self.close_camera();
+        let overlay_was_open = self.overlay_open();
+        for (key, action) in [
+            (egui::Key::F5, Action::Threats),
+            (egui::Key::F6, Action::Camera),
+            (egui::Key::F7, Action::Ai),
+            (egui::Key::F9, Action::DeepScan),
+        ] {
+            if key_pressed(&events, key) {
+                self.act(action, time);
             }
         }
-        let escape = key_pressed(&events, egui::Key::Escape);
-        if key_pressed(&events, egui::Key::F6) || (self.show_camera && self.scan_opened.is_none() && escape) {
-            if self.show_camera {
+        // Esc closes the topmost overlay.
+        if key_pressed(&events, egui::Key::Escape) {
+            if self.scan_opened.is_some() {
+                self.scan_opened = None;
+            } else if self.show_camera {
                 self.close_camera();
             } else {
-                self.open_camera();
+                self.show_ai = false;
+                self.show_threats = false;
             }
         }
-        let close_ai = self.show_ai && self.scan_opened.is_none() && escape;
-        let close_scan = self.scan_opened.is_some() && key_pressed(&events, egui::Key::Escape);
-        if key_pressed(&events, egui::Key::F9) || close_scan {
-            self.scan_opened = match self.scan_opened {
-                Some(_) => None,
-                None => {
-                    self.sound.play(Sfx::Scan);
-                    Some(time)
-                }
-            };
-        }
 
-        if close_ai {
-            self.show_ai = false;
-        }
-
-        // While an overlay is open, keystrokes don't reach the shell.
-        if self.scan_opened.is_none() && !self.show_ai && !self.show_camera {
+        // While an overlay is open (or was just closed), keystrokes don't reach the shell.
+        if !overlay_was_open && !self.overlay_open() {
             self.handle_input(&events);
             self.keyboard.observe(&events);
         }
@@ -948,9 +1165,13 @@ impl eframe::App for DaemonApp {
             self.next_chatter = time + 6.0 + self.rng.next_f32() as f64 * 12.0;
         }
 
-        egui::TopBottomPanel::top("top")
+        let clicked = egui::TopBottomPanel::top("top")
             .frame(egui::Frame::none().inner_margin(Margin::symmetric(16.0, 8.0)))
-            .show(ctx, |ui| self.top_bar(ui, &snap, time));
+            .show(ctx, |ui| self.top_bar(ui, &snap, time))
+            .inner;
+        if let Some(action) = clicked {
+            self.act(action, time);
+        }
 
         let hidden = egui::scroll_area::ScrollBarVisibility::AlwaysHidden;
 
@@ -1032,6 +1253,9 @@ impl eframe::App for DaemonApp {
         }
         if self.show_camera {
             self.camera_panel(ctx, time);
+        }
+        if self.show_threats {
+            self.threats_panel(ctx, time);
         }
 
         if let Some(opened) = self.scan_opened {

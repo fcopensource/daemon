@@ -139,6 +139,7 @@ Then `cargo run --release`.
 
 | Key | Action |
 |-----|--------|
+| <kbd>F5</kbd> | open / close the threat (malware) scan |
 | <kbd>F6</kbd> | open / close the camera feed (<kbd>Esc</kbd> also closes it) |
 | <kbd>F7</kbd> | open / close the multi-model AI analysis panel |
 | <kbd>F8</kbd> | show / hide the holo keyboard |
@@ -235,6 +236,23 @@ Ollama runs models on your own machine with no key and no data leaving it: insta
 `ollama pull llama3.2`, and set `OLLAMA_MODEL` (or `OLLAMA_HOST`) so **ANALYZE ALL** includes it.
 Requests to cloud providers are billed to your account with that provider.
 
+On many laptops the top row sends media keys (volume, brightness) unless you hold <kbd>Fn</kbd>.
+Every panel can also be opened by clicking its label in the top bar.
+
+### 🛡️ Threat scan (F5)
+
+Press <kbd>F5</kbd> to see your antivirus status (real-time protection, signature date, last quick
+and full scan) and run a **QUICK SCAN** (a few minutes) or a **FULL SYSTEM SCAN** (every file on
+every drive, which can take an hour or more). The scan keeps running if you close the panel, and the
+top bar shows the elapsed time. The result is **NO THREATS FOUND** or a list of each threat with the
+file it was found in.
+
+DAEMON uses the system's real antivirus engine and only reports what it finds:
+**Microsoft Defender** (`MpCmdRun.exe`) on Windows, and **ClamAV** (`clamscan`) on macOS and Linux
+(`brew install clamav` / `sudo apt install clamav`, then `freshclam`). Scans run with remediation
+disabled, so DAEMON never deletes or quarantines files itself. Remove threats in Windows Security
+or your antivirus.
+
 ### 📷 Camera (F6)
 
 Press <kbd>F6</kbd> to open the **OPTIC SENSOR** panel with a live webcam feed and holographic HUD.
@@ -286,6 +304,7 @@ flowchart LR
 | [`src/stats.rs`](src/stats.rs) | System statistics sampler and deep-scan report |
 | [`src/ai.rs`](src/ai.rs) | LLM providers (Claude, OpenAI-compatible APIs, Ollama) for the AI panel |
 | [`src/camera.rs`](src/camera.rs) | Webcam capture thread (nokhwa) and snapshots |
+| [`src/scan.rs`](src/scan.rs) | Malware scan via Microsoft Defender / ClamAV and result parsing |
 | [`src/files.rs`](src/files.rs) | File browser |
 | [`src/widgets.rs`](src/widgets.rs) | Graphs, bars, glass backdrop, corner brackets |
 | [`src/theme.rs`](src/theme.rs) | Color themes |
